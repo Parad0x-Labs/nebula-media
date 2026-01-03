@@ -25,6 +25,13 @@
 
 ---
 
+## 💼 Commercial & Enterprise
+*   **Pricing:** [docs/pricing.md](/docs/pricing.md)
+*   **Enterprise One-Pager:** [sales/nebula-enterprise-one-pager.md](/sales/nebula-enterprise-one-pager.md)
+*   **Investor-Safe Comparison:** [sales/nebula-investor-comparison.md](/sales/nebula-investor-comparison.md)
+
+---
+
 ## 🔑 Key Principles
 *   **Offline verification:** Proving quality locally without cloud dependency.
 *   **Deterministic pipelines:** Ensuring consistent results across deployments.
