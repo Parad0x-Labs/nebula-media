@@ -27,6 +27,7 @@ For enterprise inquiries, contact Parad0x Labs via email (**hello@parad0xlabs.co
 
 ## Notes
 
-Benchmark results are content-dependent and provided for transparency rather than universal guarantees.
-Production tuning and kernels are delivered via licensed binaries or managed services and are not published in this repository.
+- **Offline Verification:** Enterprise plans support fully offline decompression and quality verification via our sealed decoder appliance.
+- **Content Dependency:** Benchmark results are content-dependent and provided for transparency rather than universal guarantees.
+- **IP Protection:** Production tuning and kernels are delivered via licensed binaries or managed services and are not published in this repository.
 

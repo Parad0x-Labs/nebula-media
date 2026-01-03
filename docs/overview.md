@@ -9,6 +9,12 @@ Nebula Media treats media compression as an optimization pipeline, not just a co
 *   **Deterministic Conduction:** Consistent quality across varying source complexities.
 *   **Verified Locally:** Providing the tools to prove quality scores (VMAF/SSIM) locally.
 
+## IP Protection & Trust
+To ensure maximum IP protection and client sovereignty:
+- **Public Pipelines:** This repository contains demonstration stubs and verification tools.
+- **Sealed Decoders:** Production-grade media decoders and tuning kernels are delivered as licensed, sealed binaries.
+- **Offline Proof:** Clients can verify media integrity and quality metrics locally without data ever leaving their infrastructure.
+
 ## Alignment
 Nebula Media is the visual conduction pillar of Parad0x Labs, perfectly complementing the **Liquefy** data engine and the **$NULL** Sovereign OS vision.
 
