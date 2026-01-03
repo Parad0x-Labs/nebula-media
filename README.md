@@ -33,10 +33,18 @@
 ---
 
 ## 🔑 Key Principles
+*   **Sealed Decoder Appliance:** Production-grade media optimization is delivered via hardened, "Blackbox" binaries for local verification.
 *   **Offline verification:** Proving quality locally without cloud dependency.
 *   **Deterministic pipelines:** Ensuring consistent results across deployments.
 *   **Standards-based formats:** Using AV1, AVIF, and Opus for maximum compatibility.
 *   **IP-protected production engines:** Keeping the "Secret Sauce" sealed while proving the "Proof".
+
+---
+
+## 🛡️ Security & Trust
+*   **Local Restoration:** All Nebula Media archives can be restored locally using our sealed decoders.
+*   **Zero-Data Leakage:** The appliance supports `--network=none` for air-gapped security.
+*   **Quality Proof:** Independent verification of VMAF and SSIM metrics on your own infrastructure.
 
 ---
 
