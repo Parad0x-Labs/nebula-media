@@ -1,0 +1,16 @@
+# Parad0x Labs - Nebula Media .gitignore
+
+# Internal Scoped Ignores
+INTERNAL_AUDIT/**/*.txt
+INTERNAL_AUDIT/**/*.log
+MISSION_LOG_*
+
+# Build / Assets
+dist/
+build/
+assets/cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
