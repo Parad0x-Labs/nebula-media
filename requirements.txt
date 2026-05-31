@@ -2,6 +2,10 @@ pydantic>=2.0,<3.0
 click>=8.1,<9.0
 rich>=13.0,<14.0
 
+# Optional — only needed for on-chain proof anchoring (nebula/receipt.py):
+#   base58           (PDA derivation)
+#   solana, solders  (direct Solana submit; falls back to Solana CLI / Node if absent)
+
 # External tools required on PATH (not pip-installable):
 #   ffmpeg >= 7.1 built with --enable-libvmaf
 #   libvmaf >= 3.0.0
