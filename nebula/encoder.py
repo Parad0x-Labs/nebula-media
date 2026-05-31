@@ -19,7 +19,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 """
-nebula_v9.py — Adaptive Video Zone Optimizer
+nebula/encoder.py — Adaptive Video Zone Optimizer
 ============================================
 Production-quality video compression with per-zone adaptive bitrate,
 dual-encoder support (x265 / SVT-AV1), scene-aware boundary detection,
@@ -28,7 +28,7 @@ proof hashing.
 
 Public API
 ----------
-    from nebula_v9 import compress_video, CompressionResult
+    from nebula import compress_video, CompressionResult
 
     result = compress_video("input.mp4", mode="safe", target_vmaf=88)
     print(result.vmaf, result.vmaf_p1, result.ratio, result.output_path, result.proof_hash)
@@ -37,11 +37,11 @@ Modes
 -----
     safe      — conservative settings, reliable compatibility (x265/AV1 CRF target)
     balanced  — default quality/size trade-off
-    gladiator — maximum compression, accepts longer encode times
+    maximum — maximum compression, accepts longer encode times
 
 Encoders
 --------
-    x265      — battle-tested HEVC, wide device support
+    x265      — proven HEVC codec, wide device support
     svt-av1   — modern AV1, 10–40 % smaller at equal VMAF; auto-selected for
                  animated / low-grain content
 
@@ -124,7 +124,7 @@ class CompressionResult:
 class EncodeMode(str, Enum):
     SAFE      = "safe"
     BALANCED  = "balanced"
-    GLADIATOR = "gladiator"
+    MAXIMUM = "maximum"
 
 
 class Encoder(str, Enum):
@@ -148,7 +148,7 @@ _MODE_PARAMS: dict[EncodeMode, dict] = {
         "crf_av1":       30,
         "vmaf_floor":    88.0,
     },
-    EncodeMode.GLADIATOR: {
+    EncodeMode.MAXIMUM: {
         "x265_preset":   "veryslow",
         "av1_preset":    3,
         "crf_x265":      20,
@@ -689,7 +689,7 @@ def _build_svtav1_command(
 
     SVT-AV1 does not support per-zone CRF natively through ffmpeg's interface,
     so we encode each zone as a separate segment and concatenate (handled by
-    the caller for gladiator mode).  For safe/balanced, a single-pass global
+    the caller for maximum mode).  For safe/balanced, a single-pass global
     CRF is used with film-grain synthesis handling grain retention.
     """
     p        = _MODE_PARAMS[mode]
@@ -706,7 +706,7 @@ def _build_svtav1_command(
 
     # SVT-AV1 params string
     svtav1_params = f"film-grain={film_grain}:enable-overlays=1:scd=1"
-    if mode == EncodeMode.GLADIATOR:
+    if mode == EncodeMode.MAXIMUM:
         svtav1_params += ":hierarchical-levels=5:lookahead=60"
 
     pix_fmt = "yuv420p10le" if info.bit_depth == 10 else "yuv420p"
@@ -763,7 +763,7 @@ def _run_encode(cmd: List[str], log_path: Path) -> None:
 # Gladiator zone-segment encode
 # ---------------------------------------------------------------------------
 
-def _encode_gladiator_svtav1(
+def _encode_maximum_svtav1(
     ffmpeg:      str,
     input_path:  Path,
     output_path: Path,
@@ -774,7 +774,7 @@ def _encode_gladiator_svtav1(
     work_dir:    Path,
 ) -> None:
     """
-    Per-zone encode for gladiator mode with SVT-AV1.
+    Per-zone encode for maximum mode with SVT-AV1.
 
     Each zone is extracted, encoded with its own CRF, then all segments are
     concatenated via ffmpeg concat demuxer.  Zone boundaries have already been
@@ -860,7 +860,7 @@ def compress_video(
         Destination file.  If omitted, ``<input_stem>_nebula.<ext>`` is used.
         For SVT-AV1, the extension is forced to ``.mkv``; for x265, ``.mp4``.
     mode:
-        ``"safe"`` | ``"balanced"`` | ``"gladiator"``.
+        ``"safe"`` | ``"balanced"`` | ``"maximum"``.
     target_vmaf:
         Desired VMAF target (informational; used to log a warning if the
         encoded output falls short).  Range 0–100, typical 85–95.
@@ -934,7 +934,7 @@ def compress_video(
     # Encode log lives next to output
     encode_log_path = output_path.with_suffix(".encode.log")
 
-    # Temporary work dir for segment files (gladiator AV1)
+    # Temporary work dir for segment files (maximum AV1)
     work_dir = Path(tempfile.mkdtemp(prefix="nebula_"))
     log.info("work dir: %s", work_dir)
 
@@ -957,9 +957,9 @@ def compress_video(
             _run_encode(cmd, encode_log_path)
 
         else:  # SVT-AV1
-            if enc_mode == EncodeMode.GLADIATOR and len(zones) > 1:
+            if enc_mode == EncodeMode.MAXIMUM and len(zones) > 1:
                 # Per-zone encode for maximum quality control
-                _encode_gladiator_svtav1(
+                _encode_maximum_svtav1(
                     ffmpeg, input_path, output_path, info,
                     zones, enc_mode, target_vmaf, work_dir
                 )
@@ -1036,8 +1036,8 @@ def _parse_args(argv: Sequence[str]):
     import argparse
 
     parser = argparse.ArgumentParser(
-        prog            = "nebula_v9",
-        description     = "Adaptive video zone optimizer (nebula v9)",
+        prog="nebula",
+        description="Nebula video encoder",
         formatter_class = argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("input",  help="Source video file")

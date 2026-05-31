@@ -53,7 +53,7 @@ print(f"Proof: {result.proof_hash}")  # SHA-256 of output for on-chain anchoring
 | `safe` | 88+ | Archival, professional |
 | `balanced` | 74+ | Streaming, web |
 | `extreme` | 65+ | Storage-constrained |
-| `gladiator` | custom | Auto-picks best encoder per scene |
+| `maximum` | custom | Auto-picks best encoder per scene |
 
 ---
 
