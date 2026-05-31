@@ -1,0 +1,10 @@
+pydantic>=2.0,<3.0
+click>=8.1,<9.0
+rich>=13.0,<14.0
+
+# External tools required on PATH (not pip-installable):
+#   ffmpeg >= 7.1 built with --enable-libvmaf
+#   libvmaf >= 3.0.0
+#   x265 >= 3.6 or SVT-AV1 >= 2.0
+#
+# Install from source: bash scripts/install_deps.sh

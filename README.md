@@ -1,57 +1,102 @@
-# Nebula Media — Quality-Per-Bit Media Optimization Pipelines
+# nebula-media
 
-![Status: Public Overview](https://img.shields.io/badge/Status-Public_Overview-cyan?style=flat-square)
-![Conduction: Verified](https://img.shields.io/badge/Conduction-Verified-00ff41?style=flat-square)
-![License: All Rights Reserved](https://img.shields.io/badge/License-All_Rights_Reserved-white?style=flat-square)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)
+![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square)
+![FFmpeg 7.1+](https://img.shields.io/badge/FFmpeg-7.1%2B-green?style=flat-square)
 
-## Description
-**Nebula Media** is the media optimization pillar of Parad0x Labs. It provides benchmark-driven pipelines, adapters, and verification tools for video, image, and audio compression — designed for quality-per-bit efficiency, offline verification, and enterprise deployment.
+Perceptual video re-encoding pipeline. Detects scene boundaries by visual complexity, assigns per-scene CRF to hit a target VMAF floor, re-muxes the output. Built on FFmpeg and libvmaf.
 
----
-
-## 📂 What This Repo Contains
-*   **Media processing pipelines:** Example structures for video, image, and audio conduction.
-*   **Public benchmarks:** Validated results on well-known test media (e.g., Jellyfish).
-*   **Verification tooling:** Scripts for local inspection and quality checks.
-*   **Reproducible methodology:** Standardized protocols for performance verification.
-
-## 🚫 What This Repo Does NOT Contain
-*   **Proprietary encoder tuning:** Secret AQ modes, psychovisual knobs, and RC internals are excluded.
-*   **Production AV1 kernels:** Optimized conduction kernels are not public.
-*   **Psychovisual heuristics:** Specialized neural scoring models are protected.
-*   **GPU-level optimizations:** Low-level hardware acceleration code is restricted.
-
-**Important:** This repository demonstrates usage, benchmarking, and verification. Production encoder tuning and kernels are delivered via licensed binaries or managed services.
+**Not lossless. Not a codec. Not magic.** It is a scheduling layer that gives each scene the CRF it needs to hit your VMAF target while minimising bitrate. The underlying encode is x265 or SVT-AV1 via FFmpeg subprocess.
 
 ---
 
-## 💼 Commercial & Enterprise
-*   **Pricing:** [docs/pricing.md](/docs/pricing.md)
-*   **Enterprise One-Pager:** [sales/nebula-enterprise-one-pager.md](/sales/nebula-enterprise-one-pager.md)
-*   **Investor-Safe Comparison:** [sales/nebula-investor-comparison.md](/sales/nebula-investor-comparison.md)
+## Benchmarks
+
+All reproducible. See `proof-pack/` for exact commands and raw VMAF JSON.
+
+**Source matters** — these are high-bitrate camera sources, not already-compressed test vectors. Re-encoding a 25 Mbps test clip with CRF 24 produces a *larger* file — correct behaviour.
+
+| Source | Mode | VMAF | Ratio | Output |
+|--------|------|------|-------|--------|
+| Jellyfish 1080p 60fps | safe | **88.1** | 12.3x | 2.43 MB from 30 MB |
+| Sintel 1080p 24fps | safe | **96.4** | 12.9x | 2.33 MB from 30 MB |
+| Sintel 1080p 24fps | extreme | **68.7** | 22.6x | 1.33 MB from 30 MB |
+
+```bash
+bash proof-pack/encode_jellyfish_safe.sh   # reproduce any result
+```
 
 ---
 
-## 🔑 Key Principles
-*   **Sealed Decoder Appliance:** Production-grade media optimization is delivered via hardened, "Blackbox" binaries for local verification.
-*   **Offline verification:** Proving quality locally without cloud dependency.
-*   **Deterministic pipelines:** Ensuring consistent results across deployments.
-*   **Standards-based formats:** Using AV1, AVIF, and Opus for maximum compatibility.
-*   **IP-protected production engines:** Keeping the "Secret Sauce" sealed while proving the "Proof".
+## Install
+
+```bash
+pip install nebula-media
+```
+
+Requires Python 3.10+, FFmpeg 7.1+ on PATH built with libvmaf. See `scripts/install_deps.sh`.
 
 ---
 
-## 🛡️ Security & Trust
-*   **Local Restoration:** All Nebula Media archives can be restored locally using our sealed decoders.
-*   **Zero-Data Leakage:** The appliance supports `--network=none` for air-gapped security.
-*   **Quality Proof:** Independent verification of VMAF and SSIM metrics on your own infrastructure.
+## Quick start
+
+```python
+from nebula import compress_video
+
+result = compress_video("input.mp4", mode="safe", target_vmaf=88)
+print(f"VMAF: {result.vmaf:.1f}  ratio: {result.ratio:.1f}x")
+print(f"Proof: {result.proof_hash}")  # SHA-256 of output for on-chain anchoring
+```
+
+| Mode | VMAF target | Use case |
+|------|-------------|----------|
+| `safe` | 88+ | Archival, professional |
+| `balanced` | 74+ | Streaming, web |
+| `extreme` | 65+ | Storage-constrained |
+| `gladiator` | custom | Auto-picks best encoder per scene |
 
 ---
 
-## 📡 Contact
-For enterprise licensing, private engine binaries, or technical support:
-*   **Email:** [hello@parad0xlabs.com](mailto:hello@parad0xlabs.com)
-*   **X (Twitter):** [@Parad0x_Labs](https://x.com/Parad0x_Labs)
+## On-chain quality proof (optional)
 
-© 2026 Parad0x Labs. 🚀
+```python
+result = compress_video(
+    "input.mp4", mode="safe",
+    x402_keypair_path="~/.config/solana/id.json",
+)
+print(result.receipt["signature"])  # Solana tx: VMAF + SHA-256 on-chain
+```
 
+1,000 encode receipts → one 32-byte Merkle root on Solana → $0.001 total.  
+Via [DNA x402](https://github.com/Parad0x-Labs/dna-x402) + [Liquefy](https://github.com/Parad0x-Labs/liquefy).
+
+---
+
+## How it works
+
+```
+input.mp4
+  → scene detection  (ffmpeg scdet)
+  → per-scene CRF assignment (complex = lower CRF = more bits)
+  → encode: x265 or SVT-AV1 with zone params
+  → VMAF measurement (libvmaf)
+  → if VMAF < target: adjust + re-encode (max 2 passes)
+  → output.mp4 + proof_hash (SHA-256)
+```
+
+---
+
+## Nebula + Liquefy + DNA x402
+
+Nebula re-encodes. [Liquefy](https://github.com/Parad0x-Labs/liquefy) compresses the encode receipts and builds a streaming Merkle tree. [DNA x402](https://github.com/Parad0x-Labs/dna-x402) gates the API behind USDC payment and anchors the Merkle root on Solana. Together: pay for an encode → get the video + a chain-verifiable proof that it was encoded to a specific VMAF standard.
+
+---
+
+## Requirements
+
+- Python 3.10+, FFmpeg 7.1+ (`--enable-libvmaf`), libvmaf 3.0+, x265 3.6+
+- Optional on-chain receipts: `pip install "nebula-media[solana]"`
+
+---
+
+© 2026 Parad0x Labs — MIT License

@@ -1,0 +1,51 @@
+{
+  "version": "0.6.1",
+  "benchmark_id": "jellyfish_1080p_10s_x265_slow_1866k",
+  "source": {
+    "file": "jellyfish_1080_10s.mp4",
+    "url": "https://files.catbox.moe/d5r7i6.mp4",
+    "duration_s": 10,
+    "resolution": "1920x1080",
+    "size_mb": 30
+  },
+  "encode_params": {
+    "codec": "libx265",
+    "preset": "slow",
+    "bitrate_kbps": 1866,
+    "pix_fmt": "yuv420p10le",
+    "x265_params": {
+      "aq-mode": 3,
+      "aq-strength": 1.0,
+      "rdoq-level": 2,
+      "psy-rd": 1.6,
+      "psy-rdoq": 1.0,
+      "zones": "0,30,b=1.400/30,90,b=1.120"
+    },
+    "audio": "none"
+  },
+  "output": {
+    "size_mb": 2.43,
+    "size_bytes_approx": 2548039
+  },
+  "vmaf": {
+    "model": "vmaf_v0.6.1",
+    "pooled_metrics": {
+      "vmaf": {
+        "mean": 88.1,
+        "min": null,
+        "max": null,
+        "harmonic_mean": null
+      }
+    },
+    "reproduction_tolerance": {
+      "vmaf_mean_delta_max": 0.5,
+      "size_delta_pct_max": 5
+    }
+  },
+  "notes": [
+    "VMAF mean 88.1 measured with libvmaf 0.6.1 on the original reference machine.",
+    "Scores within ±0.5 VMAF points are considered a successful reproduction.",
+    "min/max/harmonic_mean are null because per-frame data was not retained in the reference run; your local run will populate them.",
+    "Encoded file was 2.43 MB (target bitrate mode — exact size varies ±5% by encoder version)."
+  ]
+}
