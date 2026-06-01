@@ -57,21 +57,36 @@ skips gracefully and still gives you the local proof.)
 
 ## Reference numbers (reproducible)
 
-From [`proof-pack/`](./proof-pack) — Jellyfish 1080p, x265 `-preset slow`, libvmaf v0.6.1:
+All measured on this machine. Commands in [`proof-pack/`](./proof-pack).
 
-| Source | Output | Ratio | VMAF |
-|---|---|---|---|
-| 30 MB | **2.43 MB** | **~12×** | **88.1** |
+### Video — Jellyfish 1080p 60fps (high-motion stress test)
+
+x265 `-preset slow`, libvmaf v0.6.1:
+
+| Source | Output | Ratio | VMAF | Mode |
+|---|---|---|---|---|
+| 30 MB | **2.43 MB** | **~12×** | **88.1** | safe |
+| 30 MB | **2.80 MB** | **10.7×** | **92.95** | CRF 28 medium |
 
 ```bash
 bash proof-pack/encode_jellyfish_safe.sh   # reproduces within ±0.5 VMAF
 ```
 
-> Honest notes: VMAF 88 is **high quality with minor artifacts on close inspection** —
-> not "indistinguishable." This is **one clip on challenging content** — savings are
-> content-dependent (clean/animated compresses more, grainy/high-motion less). The
-> reproducible benchmark uses the standalone proof-pack script; `nebula/encoder.py` is
-> the fuller scene-aware implementation.
+### Images — Kodak kodim23 (544 KB PNG, SVT-AV1)
+
+| Mode | Output | Ratio | SSIM |
+|---|---|---|---|
+| safe (CRF 20) | **30 KB** | **18×** | 0.979 |
+| balanced (CRF 35) | **14 KB** | **40×** | 0.962 |
+| maximum (CRF 50 + grain synthesis) | **7 KB** | **79×** | 0.931 |
+
+SSIM 0.979 = near-identical to the eye. SSIM 0.931 = looks sharp, detail traded for 79× smaller file.
+
+> **Honest notes:** VMAF 88 has minor artifacts on close inspection — not "indistinguishable."
+> Jellyfish is the hardest encoding benchmark (60fps, no redundancy). Clean animation and
+> talking-head content compresses significantly more. Image ratios depend heavily on content —
+> photos with fine grain compress less than synthetic or flat images. All numbers are
+> reproducible from the proof-pack scripts.
 
 ## What it is — and isn't
 
