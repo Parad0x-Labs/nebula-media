@@ -95,6 +95,17 @@ Every claim here points at code you can read and run.
 this README will say so the moment it ships. The managed service will add hosting and
 scale, never close the core.
 
+## 💸 Why people use it
+
+Video is the biggest line on most hosting bills. Nebula shrinks it — and proves the quality held:
+
+- 💾 **Cut storage and CDN cost** — re-encode big libraries far smaller at near-transparent quality.
+- 🧾 **Prove the quality** — every encode ships a receipt (VMAF + hashes) you can verify, or anchor on-chain.
+- 🎬 **For creators** — smaller uploads, same look; show clients the proof.
+- 🆓 **Free and MIT** — self-host the whole pipeline.
+
+*(Alpha; savings are content-dependent — reproduce the numbers in the proof-pack.)*
+
 ### How this fits the Parad0x stack
 
 Parad0x Labs builds Web0 on Solana — money and agents that settle themselves. **You are here: 🎬 Media.**
