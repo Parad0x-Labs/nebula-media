@@ -1,142 +1,158 @@
 # nebula-media 🎬
 
-**Proof-carrying media compression.** Re-encode video with modern codecs — and get a
-cryptographic **receipt** that proves *exactly* what was encoded, at what measured
-quality, anchored on Solana.
+**Proof-carrying media compression.** Scene-aware encoding across four codecs — with a cryptographic receipt that proves exactly what quality you shipped, anchored on Solana.
 
-Nebula is scene-aware (it spends bits where the eye actually sees them), dual-codec
-(x265 / SVT-AV1), and every encode can mint a verifiable on-chain proof through the
-Parad0x stack. Open source, MIT.
-
-![status: alpha](https://img.shields.io/badge/status-alpha-orange) ![license: MIT](https://img.shields.io/badge/license-MIT-blue) ![codecs: x265 · SVT--AV1](https://img.shields.io/badge/codecs-x265%20·%20SVT--AV1-14F195) ![proof: SHA--256 · VMAF · Solana](https://img.shields.io/badge/proof-SHA--256%20·%20VMAF%20·%20Solana-36e0ff)
+![status: alpha](https://img.shields.io/badge/status-alpha-orange) ![license: MIT](https://img.shields.io/badge/license-MIT-blue) ![codecs: x265·AV1·VVC·VideoToolbox](https://img.shields.io/badge/codecs-x265%20·%20AV1%20·%20VVC%20·%20VideoToolbox-14F195) ![proof: SHA--256·VMAF·Solana](https://img.shields.io/badge/proof-SHA--256%20·%20VMAF%20·%20Solana-36e0ff)
 
 ---
 
-## Why this matters
-
-Video is ~80% of internet traffic and the biggest line on most storage/CDN bills.
-Two problems: most encoders spend bits *evenly* (simple scenes cost as much as complex
-ones), and *"we compressed it and didn't wreck the quality"* is normally something you
-take on faith. Nebula fixes both — **scene-aware bit allocation**, and **a receipt that
-proves the quality** instead of asking you to trust it.
-
-## 1 · Scene-aware adaptive encoding
-
-[`nebula/encoder.py`](./nebula/encoder.py) doesn't slap one quality setting on the whole
-file. It:
-
-1. **Probes** the source (resolution, fps, bit-depth, grain estimate).
-2. **Detects scene cuts** (FFmpeg scene filter).
-3. **Builds zones** — complex/high-motion scenes get *more* bits (lower CRF), near-static
-   scenes get *fewer*; zone edges snap to keyframe boundaries so no bits are wasted.
-4. **Auto-picks the codec** — SVT-AV1 for clean/animated/10-bit, x265 for grainy or short
-   clips (or force one). Film-grain synthesis for noisy sources.
-5. **Measures VMAF** — mean *and* 1st-percentile (worst ~1% of frames), so quality cliffs
-   can't hide behind a good average.
-6. **Hashes the output** (SHA-256) for anchoring.
+## Quick start
 
 ```bash
-python -m nebula.encoder input.mp4 --mode balanced --target-vmaf 90
-# → output + JSON: vmaf, vmaf_p1, ratio, encoder, zones, proof_hash
+# balanced mode — auto-selects codec, measures VMAF, outputs proof hash
+python -m nebula.encoder input.mp4
+
+# force a specific encoder
+python -m nebula.encoder input.mp4 --encoder vvc --mode safe
+python -m nebula.encoder input.mp4 --encoder videotoolbox --mode balanced  # hardware, real-time
+
+# skip VMAF for speed
+python -m nebula.encoder input.mp4 --no-vmaf
 ```
 
-## 2 · On-chain proof anchoring 🧾 (the stack flex)
+Output JSON:
+```json
+{
+  "output": "input_nebula.mp4",
+  "vmaf": 95.44,
+  "vmaf_p1": 93.07,
+  "ratio": 0.191,
+  "encoder": "x265",
+  "proof_hash": "57b8f969f37c3a6d...",
+  "encode_wall_s": 20.0,
+  "cpu_pct_avg": 873.9,
+  "cpu_pct_peak": 945.3,
+  "p_cores": 4,
+  "e_cores": 6
+}
+```
 
-This is the part nobody else ships. [`nebula/receipt.py`](./nebula/receipt.py) turns an
-encode into a **tamper-evident proof** using the full Parad0x stack:
+---
 
-- Builds a **32-byte commitment** binding the *exact* output bytes + VMAF + ratio + timestamp.
-- Compresses the x402 receipt with **[Liquefy](https://github.com/Parad0x-Labs/liquefy)**.
-- Archives the receipt blob to **Arweave** (via Irys).
-- **Anchors the commitment on Solana mainnet** through the **`receipt_anchor`** program
-  (`6HSRGivdYR5D7yTDy1TFMCM8h3LzXxRtKU1RA3RnCMRN`) — the same rail [dna-x402](https://github.com/Parad0x-Labs/dna-x402) uses.
+## What it does
 
-Change one byte of the output and the commitment no longer matches. Encoding you can
-*verify*, not just trust. (Anchoring is optional — bring your own keypair; without one it
-skips gracefully and still gives you the local proof.)
+### 1 · Content-aware encoding
 
-## Reference numbers (reproducible)
+`nebula/encoder.py` auto-detects what you're compressing and routes accordingly:
 
-All measured on this machine. Commands in [`proof-pack/`](./proof-pack).
+| Content | Auto-selected encoder | Why |
+|---|---|---|
+| Screen recordings, UI, text | x265 + screen preset | no-sao stops edge blur on text; tskip=1 gives 15-40% bitrate reduction on flat fills |
+| Film / high-grain | x265 | AV1 film-grain synthesis fails above grain_level 0.5 (measured VMAF 54 on Jellyfish) |
+| Clean natural video, animation | SVT-AV1 | Faster than x265 on long content (2.37× RT vs 0.25× RT), smaller at VMAF 95+ |
 
-### Video — Jellyfish 1080p 60fps (high-motion stress test)
+Zone-based CRF runs on top of codec selection: scene cuts get more bits, near-static zones fewer. Boundaries snap to keyframe intervals.
 
-x265 `-preset slow`, libvmaf v0.6.1:
-
-| Source | Output | Ratio | VMAF | Mode |
-|---|---|---|---|---|
-| 30 MB | **2.43 MB** | **~12×** | **88.1** | safe |
-| 30 MB | **2.80 MB** | **10.7×** | **92.95** | CRF 28 medium |
+### 2 · Four encoder paths
 
 ```bash
-bash proof-pack/encode_jellyfish_safe.sh   # reproduces within ±0.5 VMAF
+--encoder x265          # HEVC — widest compatibility, best for text/grain
+--encoder svt-av1       # AV1  — default for clean content, faster + smaller
+--encoder vvc           # H.266/VVC — archival, ~25% smaller than HEVC at equal VMAF
+--encoder videotoolbox  # Apple hardware HEVC — real-time draft/preview
 ```
 
-### Images — Kodak kodim23 (544 KB PNG, SVT-AV1)
+### 3 · Apple Silicon optimised
 
-| Mode | Output | Ratio | SSIM |
+On M-series Macs, x265 is tuned to match the P/E core split. Measured on M4 (4P+6E):
+
+| Encoder | Wall time | CPU avg | Notes |
 |---|---|---|---|
-| safe (CRF 20) | **30 KB** | **18×** | 0.979 |
-| balanced (CRF 35) | **14 KB** | **40×** | 0.962 |
-| maximum (CRF 50 + grain synthesis) | **7 KB** | **79×** | 0.931 |
+| x265 balanced | 20s | 874% | P-core frame threads, WPP fills E-cores |
+| VideoToolbox | 1.6s | 134% | Encode in hardware, CPU = demux only |
 
-SSIM 0.979 = near-identical to the eye. SSIM 0.931 = looks sharp, detail traded for 79× smaller file.
+### 4 · On-chain proof anchoring
 
-> **Honest notes:** VMAF 88 has minor artifacts on close inspection — not "indistinguishable."
-> Jellyfish is the hardest encoding benchmark (60fps, no redundancy). Clean animation and
-> talking-head content compresses significantly more. Image ratios depend heavily on content —
-> photos with fine grain compress less than synthetic or flat images. All numbers are
-> reproducible from the proof-pack scripts.
+`nebula/receipt.py` turns every encode into a tamper-evident proof:
+- SHA-256 of the exact output bytes (always computed, never skipped)
+- VMAF + ratio + timestamp commitment
+- Receipt compressed with [Liquefy](https://github.com/Parad0x-Labs/liquefy)
+- Archived to Arweave, anchored on Solana via `receipt_anchor` (`6HSRGivdYR5D7yTDy1TFMCM8h3LzXxRtKU1RA3RnCMRN`)
+
+Anchoring is optional — bring your own keypair; without one it skips gracefully.
+
+---
+
+## Measured results
+
+### Screen recording (4096×2304 60fps, 1.71 GB H.264 source)
+
+| Mode | Output | Ratio | Quality |
+|---|---|---|---|
+| x265 CRF18, screen preset | **139 MB** | **11.7×** | SSIM 0.992, PSNR 47.3 dB |
+
+### Jellyfish 1080p (hard benchmark, high motion + grain)
+
+| Codec | Output | Ratio | VMAF | Time |
+|---|---|---|---|---|
+| x265 slow CRF22 +ref=8 | 5.8 MB | 5.2× | **95.44** | 264s |
+| VVC QP30 | 2.4 MB | 12.4× | 91.46 | 2445s |
+
+### From a 114 Mbps lossless master (production workflow)
+
+| Codec | Output | Ratio | VMAF |
+|---|---|---|---|
+| **VVC QP34** | **14.2 MB** | **25.2×** | **95.81** |
+| AV1 CRF32 | 4.17 MB | 32.6× | 94.21 |
+
+### Full movie (BBB 692 MB, 10 min)
+
+| Codec | Output | Ratio | VMAF | Time |
+|---|---|---|---|---|
+| AV1 p6 CRF32 | **40.7 MB** | **17×** | 94.77 | **252s (2.37× RT)** |
+| x265 slow CRF23 | 218 MB | 3.2× | 96.04 | 2390s |
+
+All measured on Apple M4, ffmpeg 8.1.1 arm64. Reproduce:
+
+```bash
+bash proof-pack/encode_jellyfish_safe.sh
+```
+
+---
+
+## Mode reference
+
+| Mode | x265 CRF | AV1 CRF | VVC QP | VTB quality | VMAF target |
+|---|---|---|---|---|---|
+| `safe` | 22 | 28 | 28 | 65 | ~96–97 |
+| `balanced` | 23 | 32 | 32 | 55 | ~95–96 |
+| `maximum` | 26 | 36 | 36 | 45 | ~90–94 |
+
+---
 
 ## What it is — and isn't
 
-- ✅ **Open (MIT)** scene-aware encoder + on-chain proof bridge. All of it is in this repo — no sealed binaries.
-- ✅ Standards-based — builds on FFmpeg, x265, SVT-AV1, Opus.
-- ❌ **Not a new codec** — it's smarter orchestration of existing ones.
-- ❌ **Not lossless** — perceptually close, not bit-identical.
-- ⏳ **Image/AVIF + audio pipelines** are early stubs — video is the live path.
+- ✅ **Open (MIT)** — encoder, proof bridge, pipelines, verification tools. No sealed binaries.
+- ✅ **Four codecs** — x265, SVT-AV1, VVC/H.266, VideoToolbox hardware path
+- ✅ **Screen content preset** — sharpness-preserving flags for text/UI/screen recordings
+- ✅ **Apple Silicon optimised** — P-core frame threads, WPP on E-cores, CPU metrics
+- ✅ **On-chain proof optional** — local SHA-256 always computed; Solana anchor needs a keypair
+- ❌ **Not a new codec** — smarter orchestration of existing ones
+- ❌ **Not lossless** — perceptually close, not bit-identical
+- ⏳ **Image/audio pipelines** — early stubs; video is the live path
+- ⏳ **target-vmaf** — informational only; rate-control to hit a VMAF target is not yet implemented
 
-## Status
+---
 
-**Alpha.** The scene-aware encoder and the Solana/Liquefy/Arweave proof bridge are
-implemented and in the repo today; the reproducible benchmark passes. It hasn't been
-hardened across every codec build or scaled to a managed service yet — and we say so.
-Every claim here points at code you can read and run.
-
-## Pricing
-
-**Self-hosted: free, forever** (MIT — clone it, run it, own it). A **managed service**
-(hosted batch encoding, API, automatic on-chain receipts) is **planned, not yet live** —
-this README will say so the moment it ships. The managed service will add hosting and
-scale, never close the core.
-
-## 💸 Why people use it
-
-Video is the biggest line on most hosting bills. Nebula shrinks it — and proves the quality held:
-
-- 💾 **Cut storage and CDN cost** — re-encode big libraries far smaller at near-transparent quality.
-- 🧾 **Prove the quality** — every encode ships a receipt (VMAF + hashes) you can verify, or anchor on-chain.
-- 🎬 **For creators** — smaller uploads, same look; show clients the proof.
-- 🆓 **Free and MIT** — self-host the whole pipeline.
-
-*(Alpha; savings are content-dependent — reproduce the numbers in the proof-pack.)*
-
-### How this fits the Parad0x stack
-
-Parad0x Labs builds Web0 on Solana — money and agents that settle themselves. **You are here: 🎬 Media.**
+## How this fits the Parad0x stack
 
 | Layer | Repo | Does |
 |---|---|---|
 | 💸 Payments | [dna-x402](https://github.com/Parad0x-Labs/dna-x402) | x402 rail: quote → pay → verify → receipt → anchor |
 | 🛠️ Build | [dna-x402-builders](https://github.com/Parad0x-Labs/dna-x402-builders) | Hosted kit: turn any API/bot into a paid agent |
-| 🕶️ Privacy | [Dark-Null-Protocol](https://github.com/Parad0x-Labs/Dark-Null-Protocol) | Groth16 privacy settlement, published proofs |
-| 🗜️ Data | [liquefy](https://github.com/Parad0x-Labs/liquefy) | Columnar compression that beats Zstd + audit trails |
-| 🎬 Media | **nebula-media** (this repo) | Proof-carrying media compression — scene-aware + on-chain receipts |
-| 🧠 Local AI | [nulla-local](https://github.com/Parad0x-Labs/nulla-local) | Local-first agent runtime — your machine, your memory |
-
-Nebula is the stack in one repo: it **encodes**, compresses the receipt with **Liquefy**,
-and anchors it through **dna-x402's** `receipt_anchor`. **See it live**: [parad0xlabs.com](https://parad0xlabs.com)
-
----
+| 🕶️ Privacy | [Dark-Null-Protocol](https://github.com/Parad0x-Labs/Dark-Null-Protocol) | Groth16 privacy settlement |
+| 🗜️ Data | [liquefy](https://github.com/Parad0x-Labs/liquefy) | Columnar compression + audit trails |
+| 🎬 Media | **nebula-media** (this repo) | Proof-carrying media compression |
+| 🧠 Local AI | [nulla-local](https://github.com/Parad0x-Labs/nulla-local) | Local-first agent runtime |
 
 **License:** MIT — © 2026 Parad0x Labs
