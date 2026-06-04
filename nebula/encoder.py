@@ -359,8 +359,16 @@ def probe_video(path: Path, ffprobe: str) -> VideoInfo:
 
 def _estimate_grain(stream: dict, fps: float) -> float:
     """
-    Heuristic grain estimate from codec metadata.
-    Real-world refinement would sample a frame and compute variance.
+    Heuristic grain estimate from bitrate-per-pixel.  NOT a measurement —
+    does not sample frames or compute spatial variance.
+
+    Limitation: underestimates grain on low-bitrate compressed film.
+    A 5 Mbps 1080p 24fps source scores ~0.378 even if the original had heavy
+    grain — the compressed bitrate reflects the encoder's efficiency, not the
+    visual complexity.  select_encoder() compensates with:
+      1. A conservative 0.35 threshold (was 0.5) to catch borderline cases.
+      2. A source-codec override for ProRes/DNxHD/raw → always x265.
+
     Returns 0.0 (clean) – 1.0 (heavy grain/noise).
 
     Parameters
@@ -403,10 +411,17 @@ def select_encoder(info: VideoInfo, encoder: Optional[Encoder]) -> Encoder:
         x265 + no-sao/tskip outperforms AV1 on UI/text because AV1 film-grain
         synthesis is irrelevant and scm=1 IBC only helps repetitive patterns.
 
-    High grain (grain_level > 0.5) → x265
+    High grain (grain_level > 0.35) → x265
         AV1 film-grain synthesis (film-grain=N metadata) failed on Jellyfish
         (VMAF 54 at grain=4); x265 encodes grain as-is and preserves texture.
         Measured: x265 CRF22 → VMAF 95.44 on Jellyfish; AV1 → VMAF 54.
+
+        Threshold is 0.35 (not 0.5) because _estimate_grain is a bitrate
+        heuristic, not a true measurement.  A 5 Mbps 1080p 24fps film scores
+        grain_level=0.378 — below 0.5 but likely grainy.  Biasing toward x265
+        on borderline cases is safer: x265 handles grain correctly, AV1 film-
+        grain synthesis is unreliable.  If grain_level < 0.35, content is
+        clean enough that AV1 is the right choice.
 
     Everything else → SVT-AV1
         Benchmarks showed AV1 preset-6 CRF32 is:
@@ -422,9 +437,22 @@ def select_encoder(info: VideoInfo, encoder: Optional[Encoder]) -> Encoder:
         log.info("auto-encoder: screen content detected → x265 (screen preset)")
         return Encoder.X265
 
-    if info.grain_level > 0.5:
+    # Source codec override: high-bitrate production codecs (ProRes, DNxHD, raw,
+    # uncompressed) are used when the original has real film grain that must be
+    # preserved.  Route these to x265 unconditionally regardless of grain_level
+    # because the bitrate heuristic can underestimate grain on short clips.
+    _GRAIN_LIKELY_CODECS = {"prores", "dnxhd", "dnxhr", "v210", "r10k", "r210",
+                            "avui", "ayuv", "rawvideo", "yuv4", "qtrle"}
+    if info.codec.lower() in _GRAIN_LIKELY_CODECS:
         log.info(
-            "auto-encoder: high grain (%.2f) → x265 "
+            "auto-encoder: production codec '%s' → x265 (likely film grain)",
+            info.codec,
+        )
+        return Encoder.X265
+
+    if info.grain_level > 0.35:
+        log.info(
+            "auto-encoder: grain %.2f > 0.35 → x265 "
             "(AV1 film-grain synthesis unreliable on this content class)",
             info.grain_level,
         )

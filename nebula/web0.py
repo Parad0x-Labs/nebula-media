@@ -388,23 +388,31 @@ def encode_video_web0(
     if content_type is None:
         content_type = detect_content_type(source, ffprobe)
 
-    params  = _VIDEO_WEB0.get(content_type, _VIDEO_WEB0[ContentType.VIDEO_NATURAL])
-    encoder = "x265" if content_type == ContentType.VIDEO_SCREEN else "svt-av1"
+    params   = _VIDEO_WEB0.get(content_type, _VIDEO_WEB0[ContentType.VIDEO_NATURAL])
     src_size = source.stat().st_size
 
+    # Do NOT hardcode the encoder for VIDEO_NATURAL.  Grain detection in
+    # select_encoder() must run after probe_video() — only it knows the actual
+    # grain_level.  Forcing "svt-av1" here bypasses that check and sends
+    # grainy film through AV1 film-grain synthesis, which collapses quality
+    # (measured: Jellyfish grain=1.0 → AV1 VMAF 54, x265 VMAF 95.44).
+    # Screen content is safe to force x265 because is_screen_content is set
+    # before probe, but natural video must let select_encoder() decide.
+    forced_encoder = "x265" if content_type == ContentType.VIDEO_SCREEN else None
+
     log.info("encode_video_web0: %s  content=%s  encoder=%s  mode=%s",
-             source.name, content_type.value, encoder, params["mode"])
+             source.name, content_type.value,
+             forced_encoder or "auto (grain-aware)", params["mode"])
 
     if output is None:
-        ext    = ".mp4" if encoder == "x265" else ".mp4"
-        output = source.with_name(source.stem + "_web0" + ext)
+        output = source.with_name(source.stem + "_web0.mp4")
     output = Path(output).resolve()
 
     result = compress_video(
         input_path         = source,
         output_path        = output,
         mode               = params["mode"],
-        encoder            = encoder,
+        encoder            = forced_encoder,   # None = auto-route by grain_level
         measure_vmaf_score = measure_vmaf,
         target_vmaf        = 93.0,   # Web0 target: slightly below archival 95
     )
@@ -416,7 +424,8 @@ def encode_video_web0(
              result.vmaf)
 
     vmaf = result.vmaf if result.vmaf >= 0 else -1.0
-    return _make_result(output, content_type, encoder, src_size, vmaf,
+    # Use the actual encoder selected (result.encoder reflects auto-routing)
+    return _make_result(output, content_type, result.encoder, src_size, vmaf,
                         ar_per_gb, ar_usd)
 
 
