@@ -186,9 +186,11 @@ class Encoder(str, Enum):
 # VVC QP values (libvvenc, medium preset):
 #   QP 28 → VMAF ~97+  (safe)
 #   QP 32 → VMAF ~96   (balanced)
-#   QP 36 → VMAF ~94   (maximum compression)
-#   Measured: QP34 → VMAF 95.81, 25.2× on 114 Mbps lossless master
+#   QP 34 → VMAF 95.81, 25.2× on 114 Mbps lossless master (MEASURED, maximum)
 #   Note: vvenc is ~10-20x slower than x265 on Apple Silicon (unoptimised arm64)
+#   The 25.2× / VMAF 95.81 result was at QP34 (maximum mode) with a 114 Mbps
+#   FFV1 lossless source — not reproducible at balanced (QP32) or with a
+#   pre-compressed H.264 source. Document the conditions, not just the number.
 #
 _MODE_PARAMS: dict[EncodeMode, dict] = {
     EncodeMode.SAFE: {
@@ -214,7 +216,7 @@ _MODE_PARAMS: dict[EncodeMode, dict] = {
         "av1_preset":    6,
         "crf_x265":      26,    # VMAF ~93, ratio ~4.8x — maximum compression
         "crf_av1":       36,    # VMAF ~94.2, ratio ~4.7x
-        "vvc_qp":        36,    # VMAF ~94
+        "vvc_qp":        34,    # VMAF 95.81, 25.2× — MEASURED on 114Mbps lossless master
         "vtb_quality":   45,    # VideoToolbox maximum compression
         "vmaf_floor":    90.0,
     },
@@ -1594,9 +1596,11 @@ def _parse_args(argv: Sequence[str]):
     parser.add_argument("--mode",   default="balanced",
                         choices=[m.value for m in EncodeMode],
                         help="Encode mode")
-    parser.add_argument("--target-vmaf", type=float, default=88.0,
+    parser.add_argument("--target-vmaf", type=float, default=95.0,
                         dest="target_vmaf",
-                        help="Target VMAF score (0–100)")
+                        help="Target VMAF score (0–100); informational — "
+                             "logs a warning if output falls short, "
+                             "does not rate-control to hit the target")
     parser.add_argument("--encoder", default=None,
                         choices=[e.value for e in Encoder] + [None],  # type: ignore[list-item]
                         help="Force encoder (default: auto)")

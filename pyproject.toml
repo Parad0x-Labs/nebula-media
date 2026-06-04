@@ -37,7 +37,7 @@ Repository = "https://github.com/Parad0x-Labs/nebula-media"
 Liquefy    = "https://github.com/Parad0x-Labs/liquefy"
 
 [project.scripts]
-nebula = "nebula.encoder:cli"
+nebula = "nebula.encoder:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

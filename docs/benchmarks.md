@@ -42,17 +42,23 @@ Screen preset (`no-sao`, `no-strong-intra-smoothing`, `tskip=1`) is critical for
 
 ## VVC H.266 — lossless Jellyfish master (136 MB, 114 Mbps)
 
-Using a FFV1 lossless intermediate as source (production-master workflow):
+Source: FFV1 lossless intermediate from the 30 MB Jellyfish H.264 clip.
+Command: `python -m nebula.encoder jellyfish_lossless_master.mkv --encoder vvc --mode maximum`
 
 | Codec | Setting | Output | Ratio | VMAF | Time |
 |---|---|---|---|---|---|
-| **VVC** | QP34 medium | **14.2 MB** | **25.2×** | **95.81** | 451s |
+| **VVC** | **QP34 medium (`--mode maximum`)** | **14.2 MB** | **25.2×** | **95.81** | 451s |
 | AV1 | p6 CRF32 | 4.17 MB | 32.6× | 94.21 | 78s |
 | x265 | CRF23 slow | 5.13 MB | 26.5× | 66† | 461s |
 
 †x265 VMAF 66 on lossless Jellyfish is a grain-pattern measurement artifact, not perceptual failure.
 
-**VVC is the only codec that clears both 20× ratio and VMAF ≥ 95 simultaneously.**
+**Conditions required to reproduce 25.2× / VMAF 95.81:**
+- `--mode maximum` (QP34), not balanced (QP32)
+- Source must be lossless or very high bitrate (114 Mbps). Re-encoding compressed H.264 gives 3–5× max regardless of codec.
+- `--mode balanced` (QP32) will give VMAF ~96 with a smaller ratio — higher quality, less compression.
+
+**VVC hit 20×+ at VMAF ≥ 95 under these specific conditions.** No other tested config did both simultaneously.
 
 ---
 

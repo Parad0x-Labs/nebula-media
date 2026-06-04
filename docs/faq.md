@@ -45,6 +45,12 @@ Compression ratio = source_bitrate / output_bitrate. If the source is already at
 
 Yes, measurably — but only at equal VMAF, not equal CRF. At VMAF 95 on a 114 Mbps lossless source, VVC QP34 (14.2 MB) vs x265 CRF22 (5.8 MB at VMAF 67 — grain measurement artifact on that source). The real comparison requires finding the x265 CRF that also hits VMAF 95 and comparing file sizes, which we haven't done on identical content yet. Community benchmarks suggest 25-40% bitrate savings for VVC at equal VMAF on natural video. Encode speed on Apple Silicon arm64 is the current problem — libvvenc isn't NEON-optimised.
 
+### Is the ZK quality proof actually ZK?
+
+Not yet. `quality_commitment.py` implements a **hash-based commitment** — a Merkle tree of per-frame SSIM/PSNR hashes with a master SHA-256 commitment that is tamper-evident and verifiable. The `MockZKBackend` returns an HMAC-SHA256 as a structural placeholder, not a zero-knowledge proof.
+
+Phase 2 (not yet implemented) wires in a real zkVM backend (RISC Zero or SP1). The `ZKBackend` Protocol is defined and ready to accept a real prover — the commitment scheme doesn't change, only the proof generation and verification logic swaps in. Call it a cryptographic commitment today and a ZK proof when the prover ships.
+
 ### What's in the CPU metrics output?
 
 Every encode now reports:
