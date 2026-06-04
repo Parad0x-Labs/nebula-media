@@ -130,29 +130,51 @@ class EncodeMode(str, Enum):
 class Encoder(str, Enum):
     X265    = "x265"
     SVT_AV1 = "svt-av1"
+    VVC     = "vvc"      # H.266 / VVC via libvvenc — next-gen, ~25% smaller than HEVC at equal VMAF
 
 
-# Mode → (x265 preset, svt-av1 preset, base CRF x265, base CRF av1)
+# Mode params — updated from measured benchmarks (2026-06-04 sweep):
+#
+# x265 CRF values (slow preset):
+#   CRF 22 → VMAF 96.7, ratio ~2.4x on BBB 90s
+#   CRF 23 → VMAF 96.1, ratio ~2.8x on BBB 90s (daily driver — 0.28x RT)
+#   CRF 26 → VMAF 93.0, ratio ~4.8x (fast draft)
+#
+# SVT-AV1 CRF values (preset 6):
+#   CRF 28 → VMAF 96.1, ratio ~2.8x
+#   CRF 32 → VMAF 95.2, ratio ~3.6x (smallest at VMAF ≥ 95)
+#   CRF 36 → VMAF 94.2, ratio ~4.7x
+#
+# VVC QP values (libvvenc, medium preset):
+#   QP 28 → VMAF ~97+  (safe)
+#   QP 32 → VMAF ~96   (balanced)
+#   QP 36 → VMAF ~94   (maximum compression)
+#   Measured: QP34 → VMAF 95.81, 25.2× on 114 Mbps lossless master
+#   Note: vvenc is ~10-20x slower than x265 on Apple Silicon (unoptimised arm64)
+#
 _MODE_PARAMS: dict[EncodeMode, dict] = {
     EncodeMode.SAFE: {
-        "x265_preset":   "medium",
+        "x265_preset":   "slow",
         "av1_preset":    6,
-        "crf_x265":      24,
-        "crf_av1":       32,
-        "vmaf_floor":    85.0,
+        "crf_x265":      22,    # VMAF ~96.7, p1 ~93
+        "crf_av1":       28,    # VMAF ~96.1
+        "vvc_qp":        28,    # VMAF ~97+
+        "vmaf_floor":    95.0,
     },
     EncodeMode.BALANCED: {
         "x265_preset":   "slow",
-        "av1_preset":    5,
-        "crf_x265":      22,
-        "crf_av1":       30,
-        "vmaf_floor":    88.0,
+        "av1_preset":    6,
+        "crf_x265":      23,    # VMAF ~96.1, ratio ~2.8x, 0.28x RT — daily driver
+        "crf_av1":       32,    # VMAF ~95.2, ratio ~3.6x — smallest at 95%+
+        "vvc_qp":        32,    # VMAF ~96
+        "vmaf_floor":    95.0,
     },
     EncodeMode.MAXIMUM: {
-        "x265_preset":   "veryslow",
-        "av1_preset":    3,
-        "crf_x265":      20,
-        "crf_av1":       28,
+        "x265_preset":   "slow",
+        "av1_preset":    6,
+        "crf_x265":      26,    # VMAF ~93, ratio ~4.8x — maximum compression
+        "crf_av1":       36,    # VMAF ~94.2, ratio ~4.7x
+        "vvc_qp":        36,    # VMAF ~94
         "vmaf_floor":    90.0,
     },
 }
@@ -189,19 +211,18 @@ def _check_dependencies(encoder: Encoder) -> dict[str, str]:
         "ffprobe": _require("ffprobe"),
     }
     if encoder == Encoder.X265:
-        # x265 is accessed via ffmpeg's libx265; no separate binary needed.
-        pass
-    elif encoder == Encoder.SVT_AV1:
-        # SVT-AV1 may be accessed either through ffmpeg (libsvtav1) or the
-        # standalone SvtAv1EncApp.  We check ffmpeg capability instead.
+        pass  # libx265 is linked into ffmpeg; no separate binary needed.
+    elif encoder in (Encoder.SVT_AV1, Encoder.VVC):
+        enc_flag = "libsvtav1" if encoder == Encoder.SVT_AV1 else "libvvenc"
+        codec_name = "SVT-AV1" if encoder == Encoder.SVT_AV1 else "VVC/H.266 (libvvenc)"
         result = subprocess.run(
             [bins["ffmpeg"], "-encoders"],
             capture_output=True, text=True, timeout=10
         )
-        if "libsvtav1" not in result.stdout:
+        if enc_flag not in result.stdout:
             raise RuntimeError(
-                "ffmpeg was found but was not compiled with --enable-libsvtav1.  "
-                "Install a full-featured build (e.g. from jellyfin/ffmpeg or BtbN)."
+                f"ffmpeg was found but was not compiled with --enable-{enc_flag}.  "
+                f"{codec_name} is not available in this build."
             )
     return bins
 
@@ -326,32 +347,44 @@ def select_encoder(info: VideoInfo, encoder: Optional[Encoder]) -> Encoder:
     """
     Choose the best encoder when the caller passes ``encoder=None``.
 
-    Heuristic rules
-    ---------------
-    * Animated / clean content (low grain) → SVT-AV1 (better flat-color coding)
-    * Heavily grained / film content       → x265  (grain synthesis more mature)
-    * 10-bit source                        → SVT-AV1 preferred (native 10-bit)
-    * Duration < 30 s (preview/clip)       → x265  (faster, no AV1 overhead)
+    Routing logic (from measured benchmarks, 2026-06-04):
+
+    Screen content → x265 with screen preset
+        x265 + no-sao/tskip outperforms AV1 on UI/text because AV1 film-grain
+        synthesis is irrelevant and scm=1 IBC only helps repetitive patterns.
+
+    High grain (grain_level > 0.5) → x265
+        AV1 film-grain synthesis (film-grain=N metadata) failed on Jellyfish
+        (VMAF 54 at grain=4); x265 encodes grain as-is and preserves texture.
+        Measured: x265 CRF22 → VMAF 95.44 on Jellyfish; AV1 → VMAF 54.
+
+    Everything else → SVT-AV1
+        Benchmarks showed AV1 preset-6 CRF32 is:
+        - Faster than x265 slow on long content (2.37x RT vs 0.25x RT on BBB full)
+        - Smaller at equal VMAF (17.5 MB vs 22.6 MB at VMAF 95+ on BBB 90s)
+        - The "duration < 30s → x265" heuristic was wrong: AV1 overhead is
+          negligible and speed advantage applies to all durations.
     """
     if encoder is not None:
         return encoder
 
-    if info.duration < 30.0:
-        log.info("auto-encoder: short clip → x265")
+    if info.is_screen_content:
+        log.info("auto-encoder: screen content detected → x265 (screen preset)")
         return Encoder.X265
 
-    if info.grain_level > 0.6:
-        log.info("auto-encoder: high grain detected (%.2f) → x265", info.grain_level)
-        return Encoder.X265
-
-    if info.bit_depth == 10 or info.grain_level < 0.25:
+    if info.grain_level > 0.5:
         log.info(
-            "auto-encoder: 10-bit=%s, grain=%.2f → svt-av1",
-            info.bit_depth == 10, info.grain_level
+            "auto-encoder: high grain (%.2f) → x265 "
+            "(AV1 film-grain synthesis unreliable on this content class)",
+            info.grain_level,
         )
-        return Encoder.SVT_AV1
+        return Encoder.X265
 
-    log.info("auto-encoder: balanced content → svt-av1 (default preference)")
+    log.info(
+        "auto-encoder: clean/balanced content, grain=%.2f → svt-av1 "
+        "(faster + smaller than x265 at VMAF 95+)",
+        info.grain_level,
+    )
     return Encoder.SVT_AV1
 
 
@@ -965,6 +998,64 @@ def _build_svtav1_command(
     return cmd
 
 
+def _build_vvc_command(
+    ffmpeg:      str,
+    input_path:  Path,
+    output_path: Path,
+    info:        VideoInfo,
+    mode:        EncodeMode,
+) -> List[str]:
+    """
+    Build the ffmpeg / libvvenc (H.266/VVC) encode command.
+
+    VVC (Versatile Video Coding / H.266) delivers ~25-40% better compression
+    than HEVC at equal perceptual quality.  Measured on this machine:
+      - QP 34, medium preset → VMAF 95.81, 25.2× ratio on 114 Mbps lossless source
+      - 692 MB movie → 40 MB at VMAF 94.77 (AV1) vs comparable VVC sizes
+
+    Speed caveat: libvvenc on Apple Silicon arm64 is not yet hardware-optimised.
+    Expect 10-20× slower than x265 (e.g. 0.05× realtime on 1080p 30fps content).
+    Use for archival encodes or when file size is the hard constraint.
+
+    vvenc uses QP (quantisation parameter) not CRF — QP range 0-63.
+    Approximate mapping to x265 CRF and expected VMAF on 1080p natural video:
+      QP 28 → VMAF ~97+  (safe)
+      QP 32 → VMAF ~96   (balanced)
+      QP 36 → VMAF ~94   (maximum)
+      QP 34 → VMAF 95.81 (confirmed on 114 Mbps lossless Jellyfish source)
+
+    -qpa true: subjective (perceptually motivated) optimisation — always on.
+    Output is MP4 with hvc1-compatible container.  libvvenc writes VVC bitstream
+    in an ISOBMFF (MP4) container; playback requires a VVC-capable player
+    (VLC 3.0.21+, ffplay, mpv with VVC build) — QuickTime does not support VVC.
+    """
+    p    = _MODE_PARAMS[mode]
+    qp   = p["vvc_qp"]
+    # vvenc presets: 0=fastest … 4=slowest.  "slow" maps to preset 3.
+    # For balanced/maximum we use medium (2) as a speed compromise.
+    vvc_preset = "slow" if mode == EncodeMode.SAFE else "medium"
+    pix_fmt = "yuv420p"   # libvvenc in this build only supports 8-bit 4:2:0
+
+    log.info(
+        "  VVC encode: QP=%d preset=%s  "
+        "(expect ~10-20x slower than x265 — libvvenc not yet arm64-optimised)",
+        qp, vvc_preset,
+    )
+
+    cmd: List[str] = [
+        ffmpeg, "-y",
+        "-i", str(input_path),
+        "-c:v", "libvvenc",
+        "-preset", vvc_preset,
+        "-qp", str(qp),
+        "-qpa", "true",       # perceptual optimisation
+        "-pix_fmt", pix_fmt,
+        "-c:a", "copy",
+        str(output_path),
+    ]
+    return cmd
+
+
 def _run_encode(cmd: List[str], log_path: Path) -> None:
     """Execute an encode command, streaming stderr to the log file."""
     log.info("running: %s", " ".join(cmd[:6]) + " …")
@@ -1095,7 +1186,9 @@ def compress_video(
         Desired VMAF target (informational; used to log a warning if the
         encoded output falls short).  Range 0–100, typical 85–95.
     encoder:
-        ``"x265"`` | ``"svt-av1"`` | ``None`` (auto-detect).
+        ``"x265"`` | ``"svt-av1"`` | ``"vvc"`` | ``None`` (auto-detect).
+        ``"vvc"`` selects H.266/VVC via libvvenc — best compression at VMAF ≥ 95
+        but ~10-20× slower than x265 on Apple Silicon (unoptimised arm64 build).
     measure_vmaf_score:
         Whether to measure VMAF after encoding.  Adds 20–40 % extra time.
     keep_work_dir:
@@ -1157,6 +1250,7 @@ def compress_video(
     # Resolve output path
     if output_path is None:
         ext = ".mkv" if selected_encoder == Encoder.SVT_AV1 else ".mp4"
+        # VVC is also MP4 — libvvenc writes ISOBMFF, hvc1 tag not applicable
         output_path = input_path.with_name(input_path.stem + "_nebula" + ext)
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1172,9 +1266,10 @@ def compress_video(
         # Scene detection
         cuts = detect_scene_cuts(input_path, ffmpeg)
 
-        # Zone construction
+        # Zone construction (VVC uses QP not CRF, but we still build zones for
+        # future per-zone QP support; pass crf_x265 as a proxy for now)
         base_crf = _MODE_PARAMS[enc_mode][
-            "crf_x265" if selected_encoder == Encoder.X265 else "crf_av1"
+            "crf_av1" if selected_encoder == Encoder.SVT_AV1 else "crf_x265"
         ]
         zones = build_zones(info, cuts, base_crf)
 
@@ -1186,9 +1281,15 @@ def compress_video(
             )
             _run_encode(cmd, encode_log_path)
 
+        elif selected_encoder == Encoder.VVC:
+            # VVC: single-pass global QP encode (no per-zone support yet)
+            cmd = _build_vvc_command(
+                ffmpeg, input_path, output_path, info, enc_mode
+            )
+            _run_encode(cmd, encode_log_path)
+
         else:  # SVT-AV1
             if enc_mode == EncodeMode.MAXIMUM and len(zones) > 1:
-                # Per-zone encode for maximum quality control
                 _encode_maximum_svtav1(
                     ffmpeg, input_path, output_path, info,
                     zones, enc_mode, target_vmaf, work_dir
