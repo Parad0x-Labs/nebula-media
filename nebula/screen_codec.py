@@ -23,7 +23,7 @@ nebula/screen_codec.py — Layered screen-content codec pipeline.
 
 Decomposes a screen recording into three independently-encoded layers:
 
-  background   x265 CRF24 slow (screen preset), static regions only —
+  background   x265 CRF28 slow (screen preset), static regions only —
                dirty-rect areas are zeroed out before encode.
 
   dirty-rect   FFV1 lossless, level=1 (all-intra), sparse —
@@ -449,9 +449,10 @@ def encode_dirtyrect_layer(
     source_path: Path,
     dirty_rects_by_frame: Dict[int, List[DirtyRect]],
     output_path: Path,
+    mask_path: Path,
     ffmpeg: str,
     info: VideoInfo,
-    crf: int = 14,
+    crf: int = 12,
 ) -> Path:
     """
     Encode the dirty-rect layer as a continuous x265 stream (not sparse).
@@ -567,6 +568,63 @@ def encode_dirtyrect_layer(
         )
     log.info("dirty-rect layer: %d frames → %s", frames_written,
              _human_bytes(output_path.stat().st_size))
+
+    # -- Second pass: encode grayscale alpha mask (FFV1 lossless) -----------
+    # For each frame: 255 where dirty rect pixels are, 0 elsewhere.
+    # Binary content compresses perfectly with FFV1.
+    mask_encode_cmd = [
+        ffmpeg, "-y", "-v", "error",
+        "-f", "rawvideo", "-pix_fmt", "gray",
+        "-s", f"{W}x{H}", "-r", fps_str,
+        "-i", "pipe:0",
+        "-c:v", "ffv1",
+        "-level", "1",
+        "-slicecrc", "1",
+        str(mask_path),
+    ]
+
+    mask_decode_cmd = [
+        ffmpeg, "-loglevel", "error",
+        "-i", str(source_path),
+        "-f", "rawvideo", "-pix_fmt", "yuv420p",
+        "pipe:1",
+    ]
+
+    mask_decode_proc = subprocess.Popen(mask_decode_cmd, stdout=subprocess.PIPE)
+    mask_encode_proc = subprocess.Popen(mask_encode_cmd, stdin=subprocess.PIPE,
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL)
+    mask_frames_written = 0
+    try:
+        mfi = 0
+        while True:
+            # Read a full YUV frame just to advance the frame counter;
+            # we only need the frame index, not the pixel data.
+            raw_m = mask_decode_proc.stdout.read(frame_size)  # type: ignore[union-attr]
+            if len(raw_m) < frame_size:
+                break
+            mask = np.zeros((H, W), dtype=np.uint8)
+            for dr in dirty_rects_by_frame.get(mfi, []):
+                mask[dr.y:dr.y2, dr.x:dr.x2] = 255
+            mask_encode_proc.stdin.write(mask.tobytes())  # type: ignore[union-attr]
+            mfi += 1
+            mask_frames_written += 1
+        mask_encode_proc.stdin.close()  # type: ignore[union-attr]
+    except BrokenPipeError:
+        log.warning("mask encode: broken pipe at frame %d", mfi)
+    finally:
+        mask_decode_proc.stdout.close()  # type: ignore[union-attr]
+        mask_decode_proc.terminate()
+        mask_decode_proc.wait()
+        mask_encode_proc.wait()
+
+    if mask_encode_proc.returncode not in (0, None):
+        raise RuntimeError(
+            f"Mask layer encode failed (exit {mask_encode_proc.returncode})"
+        )
+    log.info("mask layer: %d frames → %s", mask_frames_written,
+             _human_bytes(mask_path.stat().st_size))
+
     return output_path
 
 
@@ -666,18 +724,20 @@ def encode_cursor_layer(
 def mux_layers(
     background_path: Path,
     dirtyrect_path: Path,
+    mask_path: Path,
     cursor_path: Path,
     output_path: Path,
     ffmpeg: str,
     manifest: dict,
 ) -> Path:
     """
-    Mux background, dirty-rect, and cursor layers into a single MKV.
+    Mux background, dirty-rect, mask, and cursor layers into a single MKV.
 
     Track layout:
       Track 0 (default=yes) — background x265
-      Track 1 (default=no)  — dirty-rect FFV1
-      Track 2 (default=no)  — cursor FFV1
+      Track 1 (default=no)  — dirty-rect x265
+      Track 2 (default=no)  — alpha mask FFV1 (gray)
+      Track 3 (default=no)  — cursor FFV1
 
     The JSON manifest is attached as a file attachment with
     mimetype=application/json.
@@ -695,6 +755,7 @@ def mux_layers(
         return p.exists() and p.stat().st_size > 4096
 
     include_dirty  = _has_frames(dirtyrect_path)
+    include_mask   = _has_frames(mask_path)
     include_cursor = _has_frames(cursor_path)
 
     try:
@@ -704,23 +765,32 @@ def mux_layers(
         if include_dirty:
             cmd += ["-i", str(dirtyrect_path)]
             dirty_idx = input_idx; input_idx += 1
+        if include_mask:
+            cmd += ["-i", str(mask_path)]
+            mask_idx = input_idx; input_idx += 1
         if include_cursor:
             cmd += ["-i", str(cursor_path)]
             cursor_idx = input_idx; input_idx += 1
 
         cmd += ["-map", "0:v"]
-        disp_idx = 0
+        track_n = 1  # next video disposition index
         if include_dirty:
             cmd += ["-map", f"{dirty_idx}:v"]
-            disp_idx += 1
+            track_n += 1
+        if include_mask:
+            cmd += ["-map", f"{mask_idx}:v"]
+            track_n += 1
         if include_cursor:
             cmd += ["-map", f"{cursor_idx}:v"]
 
         cmd += ["-c", "copy", "-disposition:v:0", "default"]
+        disp = 1
         if include_dirty:
-            cmd += [f"-disposition:v:1", "0"]
+            cmd += [f"-disposition:v:{disp}", "0"]; disp += 1
+        if include_mask:
+            cmd += [f"-disposition:v:{disp}", "0"]; disp += 1
         if include_cursor:
-            cmd += [f"-disposition:v:{2 if include_dirty else 1}", "0"]
+            cmd += [f"-disposition:v:{disp}", "0"]
         cmd += [
             "-cues_to_front", "1",
             "-attach", str(manifest_tmp),
@@ -769,20 +839,19 @@ def reconstruct_from_layered_mkv(
     Output: x265 CRF18 hvc1 mp4.
     Returns output_path.
     """
-    # Note: dirty-rect layer is now x265 hevc (continuous, non-dirty zeroed).
-    # The overlay treats zero luma as transparent-equivalent — but since the
-    # background layer already has the static content, overlaying the dirty-rect
-    # on top replaces it correctly wherever the dirty rect is non-zero.
-    # For proper alpha-based compositing, the dirty-rect layer would need an
-    # alpha mask track. Currently: dirty-rect is overlaid at full opacity so
-    # static regions (zeroed in dirty-rect) overwrite the background with black.
-    # TODO v2: add alpha mask track to dirty-rect layer to fix the overwrite.
-    # For now: use overlay only when dirty rects are present (skip if 0 events).
+    # Track layout: 0=bg, 1=dirty, 2=mask(gray), 3=cursor.
+    # alphamerge combines the dirty-rect RGB with the grayscale mask so only
+    # dirty-rect pixels (mask=255) composite onto the background; zeroed
+    # non-dirty regions (mask=0) are fully transparent and leave the background
+    # untouched. If the mask track is absent (no dirty rects), dirty layer is
+    # skipped entirely and the background is used directly.
     filter_complex = (
         "[0:v:0]format=yuv420p[bg];"
-        "[0:v:1]format=yuva420p[dirty_rgba];"
+        "[0:v:1]format=yuv420p[dirty_rgb];"
+        "[0:v:2]format=yuv420p[mask_gray];"
+        "[dirty_rgb][mask_gray]alphamerge[dirty_rgba];"
         "[bg][dirty_rgba]overlay=0:0:eof_action=pass[bg_updated];"
-        "[0:v:2]format=yuva420p[cursor_rgba];"
+        "[0:v:3]format=yuva420p[cursor_rgba];"
         "[bg_updated][cursor_rgba]overlay=shortest=0:eof_action=pass[out]"
     )
 
@@ -824,7 +893,7 @@ def encode_screen_layered(
     output_path: Optional[Path] = None,
     ffmpeg: str = "ffmpeg",
     ffprobe: str = "ffprobe",
-    crf_background: int = 24,
+    crf_background: int = 28,
     dirty_threshold: int = -1,   # -1 = auto (15 for H.264/HEVC, 3 for lossless)
     detect_cursor: bool = True,
     keep_work_dir: bool = False,
@@ -837,10 +906,11 @@ def encode_screen_layered(
     1.  probe_video — extract stream metadata.
     2.  detect_cursor_track (optional) — build .nctk trajectory.
     3.  Iterate all frames via YUV pipe; detect_dirty_rects per consecutive pair.
-    4.  encode_background_layer — x265 CRF24 screen-preset, dirty regions zeroed.
-    5.  encode_dirtyrect_layer  — x265 CRF14 continuous stream, non-dirty zeroed.
+    4.  encode_background_layer — x265 CRF28 screen-preset, dirty regions zeroed.
+    5.  encode_dirtyrect_layer  — x265 CRF12 continuous stream, non-dirty zeroed.
         Inter-prediction across frames makes zero-background near-free; only
         changed pixels cost bits.  Beats FFV1 lossless on moving content by ~10x.
+        Skipped when dirty_frame_fraction > 0.65 (high-motion fallback).
     6.  encode_cursor_layer     — FFV1 sparse, white marker on black bg.
     7.  Write JSON manifest.
     8.  mux_layers              — 3-track MKV + manifest attachment.
@@ -940,10 +1010,41 @@ def encode_screen_layered(
             prev_y = y_plane.copy()
 
         dirty_frame_count = len(dirty_rects_by_frame)
+        dirty_frame_fraction = dirty_frame_count / max(1, frame_count)
+
+        # High-motion fallback: use PIXEL fraction (dirty area / frame area),
+        # not frame fraction (frames-with-any-dirty / total-frames).
+        #
+        # A 100×50 active region on a 1920×1080 frame touches dirty blocks
+        # every frame (100% frame fraction) but only 0.24% of pixels are dirty.
+        # Frame fraction would incorrectly trigger the fallback.
+        # Pixel fraction correctly identifies it as a small-region candidate.
+        #
+        # Threshold 0.40: if on average >40% of pixels per frame are dirty,
+        # the layered approach provides no benefit — single-pass x265 wins.
+        frame_area = max(1, W * H)
+        total_dirty_pixels = sum(
+            sum(dr.area for dr in rects)
+            for rects in dirty_rects_by_frame.values()
+        )
+        avg_dirty_pixel_fraction = (
+            total_dirty_pixels / (frame_area * max(1, dirty_frame_count))
+        )
+
+        skip_dirty_layer = avg_dirty_pixel_fraction > 0.40
+        if skip_dirty_layer:
+            log.warning(
+                "high-motion content (avg %.0f%% pixels dirty per frame) — "
+                "skipping dirty-rect layer, background-only encode",
+                100.0 * avg_dirty_pixel_fraction,
+            )
+
         log.info(
-            "  dirty rects: %d events across %d frames (%.1f%% frames dirty)",
+            "  dirty rects: %d events / %d frames  "
+            "avg %.1f%% pixels dirty — %s",
             total_dirty_rects, dirty_frame_count,
-            100.0 * dirty_frame_count / max(1, frame_count),
+            100.0 * avg_dirty_pixel_fraction,
+            "background-only (high motion)" if skip_dirty_layer else "layered encode",
         )
 
         # -- Stage 4: background layer --------------------------------------
@@ -955,13 +1056,20 @@ def encode_screen_layered(
             crf=crf_background,
         )
 
-        # -- Stage 5: dirty-rect layer (x265 CRF14 continuous) ---------------
+        # -- Stage 5: dirty-rect layer (x265 CRF12 continuous) + alpha mask ---
         dirtyrect_path = work_dir / "dirtyrect.mp4"
-        log.info("encoding dirty-rect layer (x265 CRF14) …")
-        encode_dirtyrect_layer(
-            source_path, dirty_rects_by_frame,
-            dirtyrect_path, ffmpeg, info,
-        )
+        mask_path = work_dir / "mask.mkv"
+        if not skip_dirty_layer:
+            log.info("encoding dirty-rect layer (x265 CRF12) + alpha mask …")
+            encode_dirtyrect_layer(
+                source_path, dirty_rects_by_frame,
+                dirtyrect_path, mask_path, ffmpeg, info,
+            )
+        else:
+            # Create empty placeholder files so mux_layers skips these tracks
+            # gracefully via its _has_frames() guard (< 4 KB → excluded).
+            dirtyrect_path.touch()
+            mask_path.touch()
 
         # -- Stage 6: cursor layer ------------------------------------------
         cursor_layer_path = work_dir / "cursor.mkv"
@@ -1009,7 +1117,7 @@ def encode_screen_layered(
         # -- Stage 8: mux ---------------------------------------------------
         log.info("muxing layers into %s …", output_path.name)
         mux_layers(
-            background_path, dirtyrect_path, cursor_layer_path,
+            background_path, dirtyrect_path, mask_path, cursor_layer_path,
             output_path, ffmpeg, manifest,
         )
 
