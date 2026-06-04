@@ -511,9 +511,17 @@ def build_zones(
         else:
             offset = 0
 
-        # BUG 3 FIX: snap start/end to keyframe boundaries.
+        # Snap start/end to keyframe boundaries for clean GOP alignment.
         snapped_start = _snap_to_keyframe_boundary(start, fps, keyint)
-        snapped_end   = _snap_to_keyframe_boundary(end,   fps, keyint)
+        # Zone end: snap, but NEVER go backward — if the nearest keyframe
+        # boundary is earlier than the original end, keep the original end.
+        # Going backward on the last zone leaves frames beyond the snap point
+        # outside all zones, and x265 encodes them with no CRF guidance,
+        # producing catastrophic quality loss (confirmed: Jellyfish VMAF 15
+        # when frames 250-299 were unzoned in a 300-frame 30fps clip with
+        # keyint=250).
+        _snapped_end = _snap_to_keyframe_boundary(end, fps, keyint)
+        snapped_end  = max(_snapped_end, end)   # never snap backward
 
         # Guard: ensure snapping did not collapse the zone below the minimum.
         effective_duration = snapped_end - snapped_start
@@ -751,35 +759,63 @@ def _build_x265_command(
 
     # Build x265 zones string.  Frame numbers are derived from the already-
     # keyframe-snapped zone boundaries produced by build_zones.
-    zone_parts: List[str] = []
-    for z in zones:
-        sf  = int(z.start * fps)
-        ef  = max(sf, int(z.end * fps) - 1)
-        crf = max(12, min(51, base_crf + z.crf_offset))
-        zone_parts.append(f"{sf},{ef},crf={crf}")
-    zones_str = "/".join(zone_parts) if zone_parts else ""
+    # --- x265-params string ---
+    # Three hard rules for x265 4.0 compatibility (confirmed from encode logs):
+    #
+    # 1. Do NOT put 'preset' or 'profile' in x265-params.  x265 4.0 dropped
+    #    them as x265-params keys; pass via ffmpeg's -preset / -profile:v flags.
+    #
+    # 2. Do NOT put 'deblock=A:B' in x265-params.  ffmpeg uses ':' as the
+    #    key=value pair separator in the x265-params string, so 'deblock=-1:-1'
+    #    is split into ('deblock=-1', '-1') — x265 sees an Unknown option '-1'.
+    #    Use the ffmpeg-level option '-x265-param deblock=A,B' or omit deblock
+    #    and rely on x265 defaults, which are equivalent to -1:-1 for most
+    #    content.  Confirmed bug: produces VMAF 15 (Jellyfish, CRF 20).
+    #
+    # 3. Do NOT put zones in x265-params when all zones share the same CRF.
+    #    For single-zone encodes (no scene cuts) x265 4.0 rejects the zones
+    #    value format and falls back to unconstrained QP — producing 217 KB
+    #    garbage at VMAF 0.39.  For single-zone, fold the CRF offset into the
+    #    global -crf flag instead.  For multi-zone, use the zones= key only
+    #    (verified working in x265 4.0 with format start,end,crf=N/start2…).
+
+    # Fold single-zone CRF offset into global CRF — no zones string needed.
+    unique_offsets = {z.crf_offset for z in zones}
+    if len(zones) <= 1 or len(unique_offsets) == 1:
+        # All zones share one CRF offset (or there are no cuts) — just adjust
+        # the global CRF.  This avoids the x265 4.0 zones= parsing bug entirely
+        # for the common case.
+        offset    = next(iter(unique_offsets), 0)
+        base_crf  = max(12, min(51, base_crf + offset))
+        zones_str = ""
+    else:
+        # Multiple zones with different CRF values (actual scene cuts).
+        # Frame boundaries: never snap backward; clamp to clip end.
+        total_frames = max(1, round(info.duration * fps))
+        zone_parts: List[str] = []
+        for z in zones:
+            sf  = int(z.start * fps)
+            ef  = min(total_frames - 1, max(sf, round(z.end * fps)))
+            crf = max(12, min(51, base_crf + z.crf_offset))
+            zone_parts.append(f"{sf},{ef},crf={crf}")
+        zones_str = "/".join(zone_parts)
 
     if info.is_screen_content:
         # Screen/text/UI preset — optimised for sharp edges and flat fills.
         #
-        # no-sao: SAO (Sample Adaptive Offset) blurs high-frequency edges like
-        #   text characters.  Disabling it is the single highest-impact change
-        #   for screen content quality.
-        # no-strong-intra-smoothing: bilinear-smooths 32x32 intra blocks,
-        #   smearing the flat fills that make text pop.  Off = sharper glyphs.
-        # tskip=1: bypasses DCT for 4x4 blocks that are already near-flat,
-        #   coding them directly.  15-40% bitrate reduction on text/UI at same
-        #   visual quality (community-validated on screen recordings).
-        # aq-mode=4: QP-adaptive with variance (vs 3 = dark-boost).  Better for
-        #   screen content where luminance variance drives text visibility.
-        # aq-strength=0.6: lighter than the natural-video default (0.8); screen
-        #   content has large flat regions that would otherwise over-receive bits.
-        # psy-rdoq=0.0: DCT-skip content does not benefit from RDOQ optimisation;
-        #   zero avoids introducing ringing on sharp text edges.
-        # deblock=0:0: no deblocking on screen content — it blurs text edges.
+        # no-sao: SAO blurs high-frequency edges like text. Disabling it is the
+        #   single highest-impact change for screen content.
+        # no-strong-intra-smoothing: bilinear-smooths 32x32 intra blocks —
+        #   smears flat fills and makes text look fuzzy.
+        # tskip=1: bypasses DCT for 4x4 near-flat blocks. 15-40% bitrate
+        #   reduction on text/UI at equal perceptual quality.
+        # aq-mode=4 / aq-strength=0.6: variance-based AQ, lighter strength for
+        #   large flat regions that don't need extra bits.
+        # psy-rdoq=0.0: DCT-skip content doesn't benefit from RDOQ.
+        # No deblock in x265-params (see rule 2 above) — omitting deblock
+        #   defaults to the encoder's internal -1:-1 which is fine here since
+        #   no-sao already handles edge preservation.
         x265_params = [
-            f"preset={preset}",
-            "profile=main10" if info.bit_depth == 10 else "profile=main",
             "high-tier=1",
             "ref=5",
             "bframes=8",
@@ -789,7 +825,6 @@ def _build_x265_command(
             "aq-strength=0.6",
             "psy-rd=0.8",
             "psy-rdoq=0.0",
-            "deblock=0:0",
             "me=umh",
             "no-sao",
             "no-strong-intra-smoothing",
@@ -797,8 +832,6 @@ def _build_x265_command(
         ]
     else:
         x265_params = [
-            f"preset={preset}",
-            "profile=main10" if info.bit_depth == 10 else "profile=main",
             "high-tier=1",
             "ref=5",
             "bframes=8",
@@ -808,17 +841,25 @@ def _build_x265_command(
             "aq-strength=0.8",
             "psy-rd=1.0",
             "psy-rdoq=1.5",
-            "deblock=-1:-1",
             "me=umh",
         ]
     if zones_str:
         x265_params.append(f"zones={zones_str}")
 
-    # Denoise + regrain for noisy sources
+    # No pre-encode denoise for x265.
+    # x265 handles film grain natively through its psychovisual optimisations
+    # (psy-rd, aq-mode) and the grain simply compresses less efficiently — which
+    # CRF already accounts for by spending more bits.  hqdn3d on high-grain
+    # content (grain_level >= 0.5) was measured to destroy perceptual quality:
+    # Jellyfish 1080p (grain=1.0) went from VMAF 88 to VMAF 15 after applying
+    # hqdn3d=2:2:3:3, because the filter blurs the fine translucent texture into
+    # a formless blob that x265 then has to encode as low-bitrate flat surfaces.
+    # The synthetic noise filter (noise=alls=5:allf=t+u) was also removed: it
+    # produces temporally-uncorrelated random noise that x265 cannot predict
+    # across frames, collapsing compression efficiency entirely.
+    # Denoise only belongs in the AV1 path, where SVT-AV1 encodes the clean
+    # signal and re-adds matching grain at decode time via bitstream metadata.
     vf_filters: List[str] = []
-    if info.grain_level > 0.5:
-        vf_filters.append("hqdn3d=2:2:3:3")    # light denoise
-        vf_filters.append("noise=alls=5:allf=t+u")  # synthetic grain (ffmpeg noise filter)
 
     # 10-bit pixel format
     pix_fmt = "yuv420p10le" if info.bit_depth == 10 else "yuv420p"
@@ -830,10 +871,19 @@ def _build_x265_command(
     if vf_filters:
         cmd += ["-filter:v", ",".join(vf_filters)]
 
+    # preset and profile must be ffmpeg-level flags, NOT in x265-params
+    # (x265 4.0 dropped them as x265-params keys — they log 'Unknown option'
+    # and the encode silently degrades).
+    profile_flag = "main10" if info.bit_depth == 10 else "main"
     cmd += [
         "-c:v", "libx265",
+        "-preset", preset,
+        "-profile:v", profile_flag,
         "-crf", str(base_crf),
-        "-x265-params", ":".join(x265_params),
+    ]
+    if x265_params:
+        cmd += ["-x265-params", ":".join(x265_params)]
+    cmd += [
         "-pix_fmt", pix_fmt,
         "-c:a", "copy",
         "-tag:v", "hvc1",          # Apple QuickTime/Finder/iOS require hvc1, not hev1
