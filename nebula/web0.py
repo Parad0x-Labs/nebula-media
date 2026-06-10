@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import subprocess
+import shutil
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -162,6 +162,12 @@ class Web0EncodeResult:
     ar_per_gb:  float = _AR_PER_GB_DEFAULT
     ar_usd:     float = _AR_USD_DEFAULT
 
+    quality_setting: int = -1
+    """Final encoder quality setting used (0-100 for images; -1 when not applicable)."""
+
+    note: str = ""
+    """Human-readable note, e.g. why the original file was kept instead of re-encoded."""
+
     def cost_at(self, ar_usd: float) -> float:
         """Cost in USD at a custom AR/USD exchange rate."""
         return self.arweave_cost_ar * ar_usd
@@ -193,6 +199,8 @@ def _make_result(
     quality_score: float,
     ar_per_gb: float = _AR_PER_GB_DEFAULT,
     ar_usd: float    = _AR_USD_DEFAULT,
+    quality_setting: int = -1,
+    note: str = "",
 ) -> Web0EncodeResult:
     output_size = output_path.stat().st_size
     ratio       = source_size / output_size if output_size else 0.0
@@ -213,6 +221,8 @@ def _make_result(
         arweave_savings_usd_at_30 = round(savings, 6),
         ar_per_gb                 = ar_per_gb,
         ar_usd                    = ar_usd,
+        quality_setting           = quality_setting,
+        note                      = note,
     )
 
 
@@ -230,16 +240,19 @@ _IMAGE_QUALITY: dict[ContentType, dict] = {
     ContentType.SCREENSHOT: {
         "avif_quality": 88,   # text must stay crisp — higher quality
         "webp_quality": 92,
+        "ssim_floor":   0.96, # below this the encode is retried at higher quality
         "description":  "screen/text content — sharpness-preserving",
     },
     ContentType.PHOTO: {
         "avif_quality": 80,   # natural photos tolerate more compression
         "webp_quality": 82,
+        "ssim_floor":   0.92,
         "description":  "natural photo — perceptually transparent",
     },
     ContentType.GRAPHIC: {
         "avif_quality": 85,   # diagrams need clean edges
         "webp_quality": 88,
+        "ssim_floor":   0.94,
         "description":  "graphic/diagram — edge-preserving",
     },
 }
@@ -249,6 +262,69 @@ _IMAGE_QUALITY: dict[ContentType, dict] = {
 # Image encoder
 # ---------------------------------------------------------------------------
 
+def _require_avif_support() -> None:
+    """Raise a clear error when Pillow was installed without AVIF support."""
+    from PIL import features
+    try:
+        ok = features.check("avif")
+    except Exception:
+        ok = False
+    if not ok:
+        raise RuntimeError(
+            "This Pillow build has no AVIF support (needs pillow>=11.3).  "
+            "Fix with:  pip install --upgrade 'pillow>=11.3'  — or pass fmt='webp'."
+        )
+
+
+def _composite_white(im) -> "object":
+    """Return an RGB copy of *im*, alpha-composited over white when transparent."""
+    from PIL import Image
+    if im.mode in ("RGBA", "LA", "PA") or "transparency" in im.info:
+        rgba = im.convert("RGBA")
+        bg   = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        return Image.alpha_composite(bg, rgba).convert("RGB")
+    return im.convert("RGB")
+
+
+def _image_ssim(ref_img, encoded_path: Path) -> float:
+    """
+    SSIM (luma, BT.709) between an in-memory reference image and an encoded
+    file on disk.  Transparent images are composited over white on BOTH sides
+    so alpha is compared fairly.  Returns -1.0 if measurement fails.
+    """
+    try:
+        import math
+        import numpy as np
+        from PIL import Image
+        from nebula.metrics import compute_ssim, rgb_to_y
+        # compute_ssim uses an 11x11 gaussian window and crops a 5 px border —
+        # anything smaller than 22 px per side has no valid SSIM region.
+        if ref_img.size[0] < 22 or ref_img.size[1] < 22:
+            log.debug("image %s too small for SSIM — skipping", ref_img.size)
+            return -1.0
+        dis_img = Image.open(encoded_path)
+        dis_img.load()
+        ref_y = rgb_to_y(np.asarray(_composite_white(ref_img), dtype=np.uint8))
+        dis_y = rgb_to_y(np.asarray(_composite_white(dis_img), dtype=np.uint8))
+        score = compute_ssim(ref_y.astype(np.float64), dis_y.astype(np.float64))
+        return -1.0 if math.isnan(score) else score
+    except Exception as exc:
+        log.warning("SSIM measurement failed: %s", exc)
+        return -1.0
+
+
+def _save_image(img, output: Path, fmt: str, q: int) -> None:
+    """Encode *img* to *output* as AVIF or WebP at quality *q*, keeping ICC."""
+    kwargs: dict = {"quality": q}
+    icc = img.info.get("icc_profile")
+    if icc:
+        kwargs["icc_profile"] = icc
+    if fmt == "avif":
+        img.save(str(output), format="AVIF", **kwargs)
+    else:  # webp
+        img.save(str(output), format="WEBP", method=6, **kwargs)
+
+
 def encode_image_web0(
     source:          Path,
     output:          Optional[Path]        = None,
@@ -256,26 +332,52 @@ def encode_image_web0(
     quality:         Optional[int]         = None,
     fmt:             str                   = "avif",
     measure_quality: bool                  = True,
+    target_ssim:     Optional[float]       = None,
+    max_quality_retries: int               = 2,
+    keep_original_if_larger: bool          = True,
     ar_per_gb:       float                 = _AR_PER_GB_DEFAULT,
     ar_usd:          float                 = _AR_USD_DEFAULT,
 ) -> Web0EncodeResult:
     """
     Compress a single image for Arweave storage.
 
+    Correctness guarantees (added for Web0/.null page publishing):
+
+    * **Alpha is preserved** — transparent PNG/WebP sources stay transparent
+      in the AVIF/WebP output (no silent flatten-to-black).
+    * **EXIF orientation is applied** — rotated camera JPEGs stay upright
+      even though the EXIF block itself is not carried into the output.
+    * **Never grows a file** — if the encode is >= the source size, the
+      original is kept (``encoder == "copy"``) so a page never gets bigger.
+    * **SSIM floor with retry** — if the measured SSIM lands below the
+      content-type floor (or *target_ssim*), the encode retries at higher
+      quality (up to *max_quality_retries* times).
+    * **Animated GIFs are refused** — the still path would silently keep
+      only frame 1; convert animations with the video path instead.
+
     Parameters
     ----------
     source:
-        Input image (JPEG, PNG, WebP, AVIF, HEIC, BMP, TIFF).
+        Input image (JPEG, PNG, WebP, AVIF, BMP, TIFF; HEIC if your Pillow
+        build decodes it).
     output:
         Output path.  Defaults to ``<source_stem>_web0.<fmt>``.
     content_type:
         PHOTO | SCREENSHOT | GRAPHIC.  Auto-detected if None.
     quality:
-        Override the auto-selected quality (0-100).
+        Override the auto-selected quality (0-100).  An explicit quality
+        disables the SSIM retry unless *target_ssim* is also given.
     fmt:
         Output format: "avif" (recommended) or "webp" (wider compat).
     measure_quality:
-        Compute SSIM between source and output (adds ~50-200 ms).
+        Compute SSIM between source and output (adds ~50-200 ms).  Required
+        for the SSIM-floor retry to function.
+    target_ssim:
+        Explicit SSIM floor (overrides the content-type default).
+    max_quality_retries:
+        Maximum quality bumps (+8 each) when SSIM is below the floor.
+    keep_original_if_larger:
+        Keep a copy of the source instead of a bigger "compressed" file.
     ar_per_gb / ar_usd:
         Arweave pricing for cost estimation.
 
@@ -283,12 +385,14 @@ def encode_image_web0(
     -------
     Web0EncodeResult
     """
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     source      = Path(source).resolve()
     fmt         = fmt.lower().lstrip(".")
     if fmt not in ("avif", "webp"):
         raise ValueError(f"Unsupported format '{fmt}'.  Choose 'avif' or 'webp'.")
+    if fmt == "avif":
+        _require_avif_support()
 
     if output is None:
         output = source.with_name(source.stem + f"_web0.{fmt}")
@@ -299,44 +403,74 @@ def encode_image_web0(
 
     params   = _IMAGE_QUALITY.get(content_type, _IMAGE_QUALITY[ContentType.PHOTO])
     q        = quality if quality is not None else params[f"{fmt}_quality"]
+    floor    = target_ssim if target_ssim is not None else params["ssim_floor"]
     src_size = source.stat().st_size
 
     log.info("encode_image_web0: %s → %s  content=%s  quality=%d",
              source.name, fmt, content_type.value, q)
 
-    img = Image.open(source).convert("RGB")
+    img = Image.open(source)
+    if getattr(img, "is_animated", False) and getattr(img, "n_frames", 1) > 1:
+        raise ValueError(
+            f"'{source.name}' is animated ({img.n_frames} frames) — the still-image "
+            "path would keep only the first frame.  Encode it as video instead "
+            "(encode_video_web0), or pass a single-frame export."
+        )
+    img = ImageOps.exif_transpose(img)
+    has_alpha = img.mode in ("RGBA", "LA", "PA") or "transparency" in img.info
+    img = img.convert("RGBA" if has_alpha else "RGB")
 
-    if fmt == "avif":
-        # Pillow 11.3.0 has native AVIF support via libavif
-        img.save(str(output), format="AVIF", quality=q)
-    else:  # webp
-        img.save(str(output), format="WEBP", quality=q, method=6)
+    # An explicit quality with no explicit floor means "trust my setting".
+    retry_enabled = measure_quality and not (quality is not None and target_ssim is None)
 
-    log.info("  %s KB → %s KB  (%.1f×)",
-             src_size // 1024,
-             output.stat().st_size // 1024,
-             src_size / output.stat().st_size)
-
-    # SSIM quality measurement (optional)
+    attempts   = 0
     ssim_score = -1.0
-    if measure_quality:
-        try:
-            from nebula.metrics import compute_ssim, rgb_to_y
-            import numpy as np
-            ref = np.array(img, dtype=np.float64)
-            dis_img = Image.open(output).convert("RGB")
-            dis = np.array(dis_img, dtype=np.float64)
-            # Compute on luma channel
-            ref_y = rgb_to_y(ref.astype(np.uint8))
-            dis_y = rgb_to_y(dis.astype(np.uint8))
-            ssim_score = compute_ssim(ref_y.astype(np.float64),
-                                      dis_y.astype(np.float64))
-            log.info("  SSIM %.4f", ssim_score)
-        except Exception as exc:
-            log.warning("SSIM measurement failed: %s", exc)
+    while True:
+        _save_image(img, output, fmt, q)
+        if measure_quality:
+            ssim_score = _image_ssim(img, output)
+        if (retry_enabled
+                and 0.0 <= ssim_score < floor
+                and attempts < max_quality_retries
+                and q < 95):
+            attempts += 1
+            q = min(95, q + 8)
+            log.info("  SSIM %.4f below floor %.3f — retry %d/%d at quality %d",
+                     ssim_score, floor, attempts, max_quality_retries, q)
+            continue
+        break
 
-    return _make_result(output, content_type, fmt, src_size, ssim_score,
-                        ar_per_gb, ar_usd)
+    if retry_enabled and 0.0 <= ssim_score < floor:
+        log.warning("  SSIM %.4f still below floor %.3f after %d retries — "
+                    "keeping best attempt (quality %d)",
+                    ssim_score, floor, attempts, q)
+
+    out_size      = output.stat().st_size
+    encoder_label = fmt
+    note          = ""
+
+    if keep_original_if_larger and out_size >= src_size:
+        # The "compressed" file is not smaller — keep the original bytes so a
+        # page never grows.  The kept file gets the source's own extension so
+        # bytes always match the file name.
+        output.unlink(missing_ok=True)
+        kept = output.with_suffix(source.suffix)
+        if kept != source:
+            shutil.copy2(source, kept)
+        output        = kept
+        encoder_label = "copy"
+        ssim_score    = 1.0
+        note          = (f"{fmt} at quality {q} was {out_size} B >= source "
+                         f"{src_size} B — original kept")
+        log.info("  %s", note)
+    else:
+        log.info("  %s KB → %s KB  (%.1f×)%s",
+                 src_size // 1024, out_size // 1024,
+                 src_size / out_size if out_size else 0.0,
+                 f"  SSIM {ssim_score:.4f}" if ssim_score >= 0 else "")
+
+    return _make_result(output, content_type, encoder_label, src_size, ssim_score,
+                        ar_per_gb, ar_usd, quality_setting=q, note=note)
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +516,7 @@ def encode_video_web0(
 
     Calls nebula.encoder.compress_video() with Web0-optimised settings.
     """
-    from nebula.encoder import compress_video, Encoder
+    from nebula.encoder import compress_video
 
     source = Path(source).resolve()
     if content_type is None:
@@ -442,6 +576,7 @@ def encode_for_web0(
     ffmpeg:          str                   = "ffmpeg",
     ffprobe:         str                   = "ffprobe",
     measure_quality: bool                  = True,
+    target_ssim:     Optional[float]       = None,   # images only
     ar_per_gb:       float                 = _AR_PER_GB_DEFAULT,
     ar_usd:          float                 = _AR_USD_DEFAULT,
 ) -> Web0EncodeResult:
@@ -478,7 +613,8 @@ def encode_for_web0(
         return encode_image_web0(
             source=source, output=output,
             content_type=content_type, quality=quality, fmt=fmt,
-            measure_quality=measure_quality, ar_per_gb=ar_per_gb, ar_usd=ar_usd,
+            measure_quality=measure_quality, target_ssim=target_ssim,
+            ar_per_gb=ar_per_gb, ar_usd=ar_usd,
         )
     elif _is_video(source):
         return encode_video_web0(
@@ -519,7 +655,12 @@ def batch_encode_web0(
     total_out  = 0
     for src in sources:
         try:
-            out = (output_dir / (src.stem + "_web0" + src.suffix)) if output_dir else None
+            out = None
+            if output_dir:
+                # Name the output after the bytes it will actually contain —
+                # the original suffix would label an AVIF file ".png".
+                out_suffix = f".{fmt}" if _is_image(src) else ".mp4"
+                out = output_dir / (src.stem + "_web0" + out_suffix)
             r = encode_for_web0(src, out, fmt=fmt, ffmpeg=ffmpeg, ffprobe=ffprobe,
                                  ar_per_gb=ar_per_gb, ar_usd=ar_usd)
             results.append(r)
@@ -546,7 +687,6 @@ def batch_encode_web0(
 def main() -> int:
     import argparse
     import json
-    import sys
 
     parser = argparse.ArgumentParser(
         prog="nebula-web0",
@@ -559,8 +699,17 @@ def main() -> int:
     parser.add_argument("--format", "-f", default="avif",
                         choices=["avif", "webp"],
                         help="Output format for images")
+    parser.add_argument("--content-type", default=None,
+                        dest="content_type",
+                        choices=[c.value for c in ContentType],
+                        help="Override content-type auto-detection "
+                             "(PNG defaults to 'screenshot' settings)")
     parser.add_argument("--quality", "-q", type=int, default=None,
                         help="Quality override for images (0-100)")
+    parser.add_argument("--target-ssim", type=float, default=None,
+                        dest="target_ssim", metavar="SSIM",
+                        help="SSIM floor for images — retries at higher quality "
+                             "if the encode lands below it (e.g. 0.96)")
     parser.add_argument("--ar-per-gb", type=float, default=_AR_PER_GB_DEFAULT,
                         metavar="AR",
                         help="Arweave storage cost in AR tokens per GB")
@@ -579,11 +728,13 @@ def main() -> int:
             r = encode_for_web0(
                 source=inputs[0],
                 output=Path(args.output) if args.output else None,
+                content_type=ContentType(args.content_type) if args.content_type else None,
                 quality=args.quality,
                 fmt=args.format,
                 ffmpeg=args.ffmpeg,
                 ffprobe=args.ffprobe,
                 measure_quality=not args.no_quality,
+                target_ssim=args.target_ssim,
                 ar_per_gb=args.ar_per_gb,
                 ar_usd=args.ar_usd,
             )
@@ -591,6 +742,7 @@ def main() -> int:
                 "output":         str(r.output_path),
                 "content_type":   r.content_type.value,
                 "encoder":        r.encoder,
+                "quality_setting": r.quality_setting,
                 "source_kb":      r.source_size // 1024,
                 "output_kb":      r.output_size // 1024,
                 "ratio":          r.ratio,
@@ -599,7 +751,8 @@ def main() -> int:
                 "arweave_cost_ar":       r.arweave_cost_ar,
                 "arweave_cost_usd":      r.arweave_cost_usd_at_30,
                 "arweave_savings_usd":   r.arweave_savings_usd_at_30,
-                "note": f"cost at ${args.ar_usd}/AR",
+                "kept_original":  r.encoder == "copy",
+                "note": (r.note + ("  " if r.note else "") + f"cost at ${args.ar_usd}/AR").strip(),
             }, indent=2))
         except Exception as exc:
             log.error("%s", exc)

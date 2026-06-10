@@ -33,6 +33,27 @@ probe → content detection → scene cuts → zone CRFs → encode → VMAF →
 
 **Apple Silicon optimisation.** On M-series Macs, x265 is tuned to run `frame-threads=P_CORES` (e.g. 4 on M4) so frame-level work lands on P-cores; WPP row parallelism fills in E-cores via `pools=+`. Measured on M4: 874% avg CPU utilisation across 10 cores (87% of total capacity).
 
+## Image + page pipeline (Web0)
+
+`nebula/web0.py` and `nebula/page.py` cover the still-image side — built for
+Arweave/.null publishing, where storage is pay-per-byte and permanent:
+
+- **`encode_image_web0`** — JPEG/PNG/WebP → AVIF (or WebP) via Pillow's bundled
+  libavif. No ffmpeg needed. Alpha preserved, EXIF orientation applied, SSIM
+  measured (own implementation in `nebula/metrics.py`), retry at higher quality
+  if SSIM lands under the content-type floor, and a never-grow guard: if the
+  encode isn't smaller, the original bytes are kept.
+- **`compress_page`** — copies a static site folder, converts every image,
+  rewrites HTML/CSS/JS references (root-absolute and document-relative forms),
+  and writes a manifest with per-file SHA-256 proof hashes + the estimated
+  Arweave cost. The output folder is always a working page.
+- Content-type quality tiers: photo (q80), graphic (q85), screenshot/text (q88) —
+  text gets more bits because compression artifacts on glyphs are the first
+  thing a human notices.
+
+Measured on the Kodak test set (reproducible — `proof-pack/encode_kodak_images.sh`):
+kodim23 11.4× at SSIM 0.9747, kodim13 (hardest of the set) 5.6× at SSIM 0.9859.
+
 ## Proof pipeline
 
 `nebula/receipt.py` turns an encode into a tamper-evident proof:
@@ -45,4 +66,4 @@ Anchoring is optional. Without a keypair it skips gracefully and still produces 
 
 ## Status
 
-Alpha. The encoder pipeline and proof bridge are implemented. Image and audio pipelines are early stubs. VVC is functional but encode speed on Apple Silicon arm64 is ~10-20× slower than x265 until libvvenc gets NEON optimisation.
+Alpha. The encoder pipeline, the image/AVIF + page pipeline, and the proof bridge are implemented. The audio pipeline is an early stub. VVC is functional but encode speed on Apple Silicon arm64 is ~10-20× slower than x265 until libvvenc gets NEON optimisation.

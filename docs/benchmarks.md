@@ -1,6 +1,29 @@
 # Benchmarks
 
-All results measured on **Apple M4** (4P + 6E cores), ffmpeg 8.1.1 arm64 static build, 2026-06-04.
+Video results measured on **Apple M4** (4P + 6E cores), ffmpeg 8.1.1 arm64 static build, 2026-06-04.
+Image results measured on **Windows 10 x64**, Python 3.10, Pillow 12.2.0 (bundled libavif), 2026-06-10.
+
+---
+
+## Images — Kodak test set (AVIF, `nebula.web0` pipeline)
+
+Pure-Python path (no ffmpeg). SSIM from `nebula/metrics.py` (luma, scikit-image-compatible).
+
+| Image | Setting | Output | Ratio | SSIM |
+|---|---|---|---|---|
+| kodim23 parrots (545 KB PNG) | photo q80 | **47.7 KB** | **11.4×** | 0.9747 |
+| kodim23 | screenshot q88 | 74.9 KB | 7.3× | 0.9843 |
+| kodim13 river rapids (803 KB PNG) | photo q80 | **142.4 KB** | **5.6×** | 0.9859 |
+| kodim13 | screenshot q88 | 184.4 KB | 4.4× | 0.9948 |
+
+kodim13 is the most detailed image in the Kodak set — together the two bracket
+the realistic photo range at **5.6–11.4×**. Flat graphics and UI screenshots
+compress far more; grainy photos less. Reproduce (sources auto-download,
+SHA-256-verified; tolerance size ±5%, SSIM ±0.005):
+
+```bash
+bash proof-pack/encode_kodak_images.sh
+```
 
 ---
 

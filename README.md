@@ -1,23 +1,27 @@
 # nebula-media 🎬
 
-**Proof-carrying media compression.** Scene-aware encoding across four codecs — with a cryptographic receipt that proves exactly what quality you shipped, anchored on Solana.
+**Proof-carrying media compression.** Scene-aware video across four codecs, AVIF images, and a one-command **.null page mode** — with a cryptographic receipt that proves exactly what quality you shipped, anchored on Solana.
 
-![status: alpha](https://img.shields.io/badge/status-alpha-orange) ![license: MIT](https://img.shields.io/badge/license-MIT-blue) ![codecs: x265·AV1·VVC·VideoToolbox](https://img.shields.io/badge/codecs-x265%20·%20AV1%20·%20VVC%20·%20VideoToolbox-14F195) ![proof: SHA--256·VMAF·Solana](https://img.shields.io/badge/proof-SHA--256%20·%20VMAF%20·%20Solana-36e0ff)
+![status: alpha](https://img.shields.io/badge/status-alpha-orange) ![license: MIT](https://img.shields.io/badge/license-MIT-blue) ![codecs: x265·AV1·VVC·VideoToolbox·AVIF](https://img.shields.io/badge/codecs-x265%20·%20AV1%20·%20VVC%20·%20VideoToolbox%20·%20AVIF-14F195) ![proof: SHA--256·VMAF·SSIM·Solana](https://img.shields.io/badge/proof-SHA--256%20·%20VMAF%20·%20SSIM%20·%20Solana-36e0ff)
 
 ---
 
 ## Quick start
 
 ```bash
-# balanced mode — auto-selects codec, measures VMAF, outputs proof hash
+pip install -e .          # image + page modes are pure Python (Pillow/libavif)
+
+# VIDEO — balanced mode: auto-selects codec, measures VMAF, outputs proof hash
 python -m nebula.encoder input.mp4
-
-# force a specific encoder
 python -m nebula.encoder input.mp4 --encoder vvc --mode safe
-python -m nebula.encoder input.mp4 --encoder videotoolbox --mode balanced  # hardware, real-time
+python -m nebula.encoder input.mp4 --no-vmaf            # skip VMAF for speed
 
-# skip VMAF for speed
-python -m nebula.encoder input.mp4 --no-vmaf
+# IMAGES — AVIF with SSIM measurement + Arweave cost estimate (no ffmpeg needed)
+python -m nebula.web0 photo.jpg
+python -m nebula.web0 logo.png --target-ssim 0.97
+
+# .NULL PAGE — compress a whole site folder, rewrite refs, emit proof manifest
+python -m nebula.page ./my-site                          # → ./my-site_web0
 ```
 
 Output JSON:
@@ -62,7 +66,27 @@ Zone-based CRF runs on top of codec selection: scene cuts get more bits, near-st
 --encoder videotoolbox  # Apple hardware HEVC — real-time draft/preview
 ```
 
-### 3 · Apple Silicon optimised
+### 3 · Images → AVIF, pure Python
+
+`nebula/web0.py` re-encodes images for the web — built for Arweave, where every
+byte is paid for permanently. No ffmpeg: Pillow ≥ 11.3 ships libavif.
+
+- **Alpha preserved** (transparent logos stay transparent), **EXIF orientation applied**
+- **SSIM measured** on every encode (own scikit-image-compatible implementation), with an
+  automatic retry at higher quality if it lands below the content-type floor
+- **Never grows a file** — if AVIF isn't smaller, the original bytes are kept
+- Content-type tiers: photo q80 · graphic q85 · screenshot/text q88 (glyphs get more bits)
+- Animated GIFs are refused, not silently flattened to frame 1
+
+### 4 · .null / Web0 page mode
+
+`nebula/page.py` is the pre-publish step for a .null site: copy the folder,
+convert every image, **rewrite the references** in HTML/CSS/JS (root-absolute
+and document-relative forms), and write a manifest with per-file SHA-256 proof
+hashes + the estimated Arweave cost. Output is always a working page — anything
+that can't be made smaller ships byte-for-byte.
+
+### 5 · Apple Silicon optimised
 
 On M-series Macs, x265 is tuned to match the P/E core split. Measured on M4 (4P+6E):
 
@@ -71,7 +95,7 @@ On M-series Macs, x265 is tuned to match the P/E core split. Measured on M4 (4P+
 | x265 balanced | 20s | 874% | P-core frame threads, WPP fills E-cores |
 | VideoToolbox | 1.6s | 134% | Encode in hardware, CPU = demux only |
 
-### 4 · On-chain proof anchoring
+### 6 · On-chain proof anchoring
 
 `nebula/receipt.py` turns every encode into a tamper-evident proof:
 - SHA-256 of the exact output bytes (always computed, never skipped)
@@ -112,11 +136,55 @@ Anchoring is optional — bring your own keypair; without one it skips gracefull
 | AV1 p6 CRF32 | **40.7 MB** | **17×** | 94.77 | **252s (2.37× RT)** |
 | x265 slow CRF23 | 218 MB | 3.2× | 96.04 | 2390s |
 
-All measured on Apple M4, ffmpeg 8.1.1 arm64. Reproduce:
+### Images — Kodak test set (AVIF via Pillow/libavif)
+
+| Image | Setting | Output | Ratio | SSIM |
+|---|---|---|---|---|
+| kodim23 parrots (545 KB PNG) | photo q80 | **47.7 KB** | **11.4×** | 0.9747 |
+| kodim23 | screenshot q88 | 74.9 KB | 7.3× | 0.9843 |
+| kodim13 river detail (803 KB PNG) | photo q80 | **142.4 KB** | **5.6×** | 0.9859 |
+| kodim13 | screenshot q88 | 184.4 KB | 4.4× | 0.9948 |
+
+kodim13 is the hardest image in the set — the 5.6–11.4× spread is the honest
+range for real photos. Flat graphics compress far more; don't quote these as
+universal.
+
+Video measured on Apple M4 (ffmpeg 8.1.1 arm64); images on Windows 10 x64
+(Pillow 12.2.0). Reproduce both:
 
 ```bash
-bash proof-pack/encode_jellyfish_safe.sh
+bash proof-pack/encode_jellyfish_safe.sh      # video — needs ffmpeg+libvmaf
+bash proof-pack/encode_kodak_images.sh        # images — pure Python, auto-downloads sources
 ```
+
+---
+
+## Publish a .null page (Web0)
+
+Arweave is pay-once, store-forever — compression isn't cosmetics, it's the
+publishing economics. The flow with the [web0](https://github.com/Parad0x-Labs/web0)
+stack:
+
+```bash
+# 1. compress the site folder (images → AVIF, refs rewritten, manifest written)
+python -m nebula.page ./my-site
+# → my-site_web0/  + nebula_page_manifest.json (per-file SHA-256 + SSIM + cost)
+
+# 2. check it locally — open my-site_web0/index.html in a browser
+
+# 3. publish with web0's one-command publisher (uploads via Irys, re-points
+#    your .null domain on Solana, verifies resolution)
+node scripts/publish.mjs ./my-site_web0/index.html --name yourname
+```
+
+The JSON summary tells you what you'll pay before you upload — e.g. a 3 MB
+image-heavy page typically lands well under 1 MB, and the manifest is the
+receipt: every published file's hash, quality score, and size, ready to anchor
+through `receipt_anchor` like any other nebula proof.
+
+AVIF renders in every current browser (Chrome 85+, Firefox 93+, Safari 16.4+);
+the .null resolver extension is Chromium-based, so published pages decode
+everywhere they can be viewed.
 
 ---
 
@@ -128,18 +196,29 @@ bash proof-pack/encode_jellyfish_safe.sh
 | `balanced` | 23 | 32 | 32 | 55 | ~95–96 |
 | `maximum` | 26 | 36 | 36 | 45 | ~90–94 |
 
+Image tiers (auto-detected, override with `--content-type` / `--quality`):
+
+| Content type | AVIF q | WebP q | SSIM floor (auto-retry below) |
+|---|---|---|---|
+| photo | 80 | 82 | 0.92 |
+| graphic | 85 | 88 | 0.94 |
+| screenshot / text | 88 | 92 | 0.96 |
+
 ---
 
 ## What it is — and isn't
 
 - ✅ **Open (MIT)** — encoder, proof bridge, pipelines, verification tools. No sealed binaries.
-- ✅ **Four codecs** — x265, SVT-AV1, VVC/H.266, VideoToolbox hardware path
+- ✅ **Four video codecs** — x265, SVT-AV1, VVC/H.266, VideoToolbox hardware path
+- ✅ **Image/AVIF pipeline** — pure Python (Pillow/libavif), alpha-safe, SSIM-measured, never grows a file
+- ✅ **.null page mode** — site folder in, upload-ready folder + proof manifest out
 - ✅ **Screen content preset** — sharpness-preserving flags for text/UI/screen recordings
 - ✅ **Apple Silicon optimised** — P-core frame threads, WPP on E-cores, CPU metrics
 - ✅ **On-chain proof optional** — local SHA-256 always computed; Solana anchor needs a keypair
 - ❌ **Not a new codec** — smarter orchestration of existing ones
 - ❌ **Not lossless** — perceptually close, not bit-identical
-- ⏳ **Image/audio pipelines** — early stubs; video is the live path
+- ⏳ **Audio pipeline** — early stub
+- ⏳ **Animated GIF → video** — not automated yet; the image path refuses animations rather than dropping frames
 - ⏳ **target-vmaf** — informational only; rate-control to hit a VMAF target is not yet implemented
 
 ---

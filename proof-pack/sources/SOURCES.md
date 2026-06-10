@@ -1,8 +1,26 @@
 # Benchmark Source Files
 
-All source clips used in the proof-pack benchmarks are listed here with download
-instructions. Reproducers must use these exact files. Encoding a different clip of
-the same name will produce different VMAF numbers.
+All source files used in the proof-pack benchmarks are listed here with download
+instructions. Reproducers must use these exact files. Encoding a different file of
+the same name will produce different quality numbers.
+
+---
+
+## Kodak still images (image/AVIF benchmark)
+
+The classic Kodak Photo CD test set — uncompressed-origin PNGs, public test
+images used by virtually every image-codec paper. `encode_kodak_images.sh`
+downloads them into this directory automatically and verifies these hashes
+before encoding:
+
+| File        | URL                                              | Size      | SHA-256 |
+|-------------|--------------------------------------------------|-----------|---------|
+| kodim23.png | https://r0k.us/graphics/kodak/kodak/kodim23.png | 557,596 B | `e3111a2fd4da24af15d6459ef9eacfe54106b38e27b4a21821b75c3f5d2d5baf` |
+| kodim13.png | https://r0k.us/graphics/kodak/kodak/kodim13.png | 822,712 B | `bc34a3ce58dea09dce1704c997171602de90cb34d0c8503a988b77f473d39b08` |
+
+kodim23 (parrots) is a moderate-detail photo; kodim13 (river rapids) is the
+hardest image in the set — together they bracket the realistic ratio range.
+Downloaded PNGs and generated AVIFs in this directory are gitignored.
 
 ---
 
