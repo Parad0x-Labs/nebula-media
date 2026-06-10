@@ -1,0 +1,57 @@
+{
+  "version": "1.0",
+  "benchmark_id": "kodak_avif_pillow_libavif",
+  "pipeline": "nebula.web0.encode_image_web0 — Pillow >= 11.3 (bundled libavif), SSIM from nebula.metrics (luma, BT.709, 11x11 gaussian, crop 5)",
+  "sources": [
+    {
+      "file": "kodim23.png",
+      "url": "https://r0k.us/graphics/kodak/kodak/kodim23.png",
+      "sha256": "e3111a2fd4da24af15d6459ef9eacfe54106b38e27b4a21821b75c3f5d2d5baf",
+      "size_bytes": 557596,
+      "description": "Kodak kodim23 — parrots; classic photo test, moderate detail"
+    },
+    {
+      "file": "kodim13.png",
+      "url": "https://r0k.us/graphics/kodak/kodak/kodim13.png",
+      "sha256": "bc34a3ce58dea09dce1704c997171602de90cb34d0c8503a988b77f473d39b08",
+      "size_bytes": 822712,
+      "description": "Kodak kodim13 — river rapids; hardest of the set, dense fine detail"
+    }
+  ],
+  "cases": [
+    {
+      "source": "kodim23.png",
+      "content_type": "photo",
+      "avif_quality": 80,
+      "expected": { "output_bytes": 48807, "ratio": 11.42, "ssim": 0.9747 }
+    },
+    {
+      "source": "kodim23.png",
+      "content_type": "screenshot",
+      "avif_quality": 88,
+      "expected": { "output_bytes": 76727, "ratio": 7.27, "ssim": 0.9843 }
+    },
+    {
+      "source": "kodim13.png",
+      "content_type": "photo",
+      "avif_quality": 80,
+      "expected": { "output_bytes": 145843, "ratio": 5.64, "ssim": 0.9859 }
+    },
+    {
+      "source": "kodim13.png",
+      "content_type": "screenshot",
+      "avif_quality": 88,
+      "expected": { "output_bytes": 188874, "ratio": 4.36, "ssim": 0.9948 }
+    }
+  ],
+  "reproduction_tolerance": {
+    "ssim_delta_max": 0.005,
+    "size_delta_pct_max": 5
+  },
+  "notes": [
+    "Reference run: Windows 10 x64, Python 3.10.11, Pillow 12.2.0 (bundled libavif), 2026-06-10.",
+    "Different libavif/aom versions shift output size a few percent at identical quality settings — that is why the size tolerance is ±5%.",
+    "SSIM is computed by nebula.metrics.compute_ssim on the BT.709 luma plane (scikit-image-compatible, gaussian 11x11, 5 px border crop) — other SSIM implementations will produce slightly different absolute values.",
+    "Ratios are content-dependent: the detailed kodim13 compresses ~2x less than kodim23 at the same setting. Synthetic/flat images compress far more; do not quote these numbers as universal."
+  ]
+}

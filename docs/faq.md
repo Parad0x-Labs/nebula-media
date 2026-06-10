@@ -72,10 +72,28 @@ Each encode produces a SHA-256 digest of the exact output file. With a Solana ke
 
 Without a keypair, it skips anchoring and still gives you the local SHA-256 for manual verification.
 
+### How do I compress images / a whole .null site?
+
+The image path is live and needs **no ffmpeg** — Pillow (>= 11.3) ships libavif:
+
+```bash
+python -m nebula.web0 photo.jpg                 # → photo_web0.avif + SSIM + cost estimate
+python -m nebula.page ./my-site                 # → ./my-site_web0, refs rewritten, manifest
+```
+
+`nebula.page` copies your site folder, converts every image to AVIF (alpha
+preserved, EXIF orientation applied), rewrites the references in HTML/CSS/JS,
+and writes a manifest with per-file SHA-256 proof hashes plus the estimated
+Arweave cost — the pre-publish step for a .null page. Anything that wouldn't
+get smaller is kept byte-for-byte, so the output is always a working page.
+Measured on the Kodak set: 5.6–11.4× smaller at SSIM 0.975–0.986
+(`bash proof-pack/encode_kodak_images.sh` to reproduce).
+
 ### Is this production-ready?
 
 **Alpha.** The encoder pipeline is functional and benchmarked. Known rough edges:
 - VVC is slow on Apple Silicon (libvvenc arm64 not yet optimised)
 - VideoToolbox writes `hev1` tag — opens in QuickTime but Finder thumbnail may not render
-- Image and audio pipelines are stubs
+- Audio pipeline is a stub (image/AVIF is live as of v0.2.0)
+- Animated GIFs are refused by the image path (convert to video manually)
 - `--target-vmaf` is still informational — it logs a warning if quality misses but doesn't rate-control to hit the target

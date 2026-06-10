@@ -6,24 +6,53 @@ Independent reproducibility kit for the nebula-media codec benchmarks.
 
 ## What this proves
 
+### Video
+
 | Clip            | Preset | Bitrate   | Output size | VMAF  | Speed   |
 |-----------------|--------|-----------|-------------|-------|---------|
 | Jellyfish 1080p | slow   | 1 866 kbps | 2.43 MB    | 88.1  | —       |
 | Sintel 1080p    | slow   | —          | —           | 96.4  | 12.9x   |
 
 Scores were produced with **libx265** and measured with **libvmaf v0.6.1**.
-All source clips are freely licensed; see [sources/SOURCES.md](sources/SOURCES.md)
+
+### Images (AVIF — `nebula.web0` pipeline)
+
+| Image | Setting | Output | Ratio | SSIM |
+|---|---|---|---|---|
+| kodim23.png (545 KB) | photo, q80      | 47.7 KB  | **11.4×** | 0.9747 |
+| kodim23.png          | screenshot, q88 | 74.9 KB  | 7.3×      | 0.9843 |
+| kodim13.png (803 KB) | photo, q80      | 142.4 KB | **5.6×**  | 0.9859 |
+| kodim13.png          | screenshot, q88 | 184.4 KB | 4.4×      | 0.9948 |
+
+Encoded with **Pillow ≥ 11.3 (bundled libavif)** — no ffmpeg needed for the
+image path. SSIM is nebula's own implementation (`nebula/metrics.py`, luma,
+scikit-image-compatible). Run:
+
+```
+bash proof-pack/encode_kodak_images.sh
+```
+
+Reference numbers + tolerances: [results/kodak_images_expected.json](results/kodak_images_expected.json)
+(size ±5 %, SSIM ±0.005 — covers libavif version differences). The script
+downloads the two Kodak sources automatically and verifies their SHA-256.
+
+All source files are freely licensed; see [sources/SOURCES.md](sources/SOURCES.md)
 for download links and integrity notes.
 
 ---
 
 ## Prerequisites
 
+For the **video** benchmark:
+
 - **ffmpeg** compiled with `--enable-libx265` and `--enable-libvmaf`
   (most package-manager builds include both)
 - **python3** (for JSON parsing in the shell script; stdlib only)
 - **bc** (for arithmetic in bash; ships with most Linux/macOS installs)
 - ~4 GB free disk space for the source + encoded files
+
+For the **image** benchmark: only `python3` with the repo's Python deps
+(`pip install -e .` — pillow>=11.3, numpy, scipy) and `curl`. No ffmpeg.
 
 Check your ffmpeg build:
 
@@ -124,9 +153,12 @@ ffmpeg -i jellyfish_1080_10s.mp4 \
 ```
 proof-pack/
   README.md                          — this file
-  encode_jellyfish_safe.sh           — end-to-end encode + VMAF script
+  encode_jellyfish_safe.sh           — video: end-to-end encode + VMAF script
+  encode_kodak_images.sh             — images: download, AVIF-encode, SSIM-check
   sources/
     SOURCES.md                       — download URLs + integrity notes
+    (kodim*.png / *.avif)            — fetched + generated locally, gitignored
   results/
     jellyfish_safe_expected.json     — reference VMAF JSON for comparison
+    kodak_images_expected.json       — reference image sizes + SSIM for comparison
 ```

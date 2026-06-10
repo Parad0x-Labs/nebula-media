@@ -8,7 +8,8 @@ Nebula Media is **MIT-licensed and free to self-host**. Clone the repo, run the
 pipelines, generate and verify receipts — no license, no lock-in.
 
 This includes:
-- Media encoding pipelines (video / audio; image is on the roadmap)
+- Media encoding pipelines (video + image/AVIF live, including the .null page
+  mode; audio is on the roadmap)
 - Public benchmark documentation and reproducible proof-pack
 - Verification tooling and methodology
 
