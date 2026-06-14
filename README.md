@@ -4,6 +4,8 @@
 
 ![status: alpha](https://img.shields.io/badge/status-alpha-orange) ![license: MIT](https://img.shields.io/badge/license-MIT-blue) ![codecs: x265·AV1·VVC·VideoToolbox·AVIF](https://img.shields.io/badge/codecs-x265%20·%20AV1%20·%20VVC%20·%20VideoToolbox%20·%20AVIF-14F195) ![proof: SHA--256·VMAF·SSIM·Solana](https://img.shields.io/badge/proof-SHA--256%20·%20VMAF%20·%20SSIM%20·%20Solana-36e0ff)
 
+> **Setting this up (or pointing an AI agent at it)?** Read **[AGENTS.md](AGENTS.md)** — full cold-start: clone → install ffmpeg → `pip install -e .` → `bash scripts/check.sh` verifies everything. Works for Claude Code, Codex, Cursor, or a human.
+
 ---
 
 ## Quick start
