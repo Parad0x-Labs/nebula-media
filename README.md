@@ -21,6 +21,7 @@ python -m nebula.web0 photo.jpg
 python -m nebula.web0 logo.png --target-ssim 0.97
 
 # PLATFORM TARGET — universal (AV1/AVIF, for Arweave) vs X (H.264 1080p, Twitter-safe)
+# (video targets need ffmpeg on PATH:  brew install ffmpeg  /  apt install ffmpeg)
 python -m nebula.web0 clip.mp4                # universal: best quality+size, store on Arweave
 python -m nebula.web0 clip.mp4 --target x     # X-compatible: H.264 1080p + audio (X rejects AV1)
 

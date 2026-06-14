@@ -115,6 +115,27 @@ _X_FREE_DURATION  = 140.0    # seconds — free-tier cap (Premium goes longer)
 _X_VIDEO_CRF      = 20       # x264 CRF; clean 1080p source for X's own re-encode
 
 
+def _require_ffmpeg(ffmpeg: str, ffprobe: str) -> None:
+    """
+    Raise a clear, actionable error if ffmpeg/ffprobe aren't available.
+
+    Video encoding needs them; image and page modes do not.  Without this the
+    failure surfaces as a cryptic "[Errno 2] No such file or directory:
+    'ffprobe'", which a first-time user can't act on.
+    """
+    missing = [b for b in (ffmpeg, ffprobe)
+               if shutil.which(b) is None and not Path(b).is_file()]
+    if missing:
+        raise RuntimeError(
+            f"Video encoding needs ffmpeg + ffprobe on your PATH (not found: "
+            f"{', '.join(missing)}).\n"
+            f"  macOS:         brew install ffmpeg\n"
+            f"  Ubuntu/Debian: sudo apt install ffmpeg\n"
+            f"  Windows:       https://ffmpeg.org/download.html\n"
+            f"(Image and .null page modes don't need ffmpeg — only video does.)"
+        )
+
+
 def _is_image(path: Path) -> bool:
     return path.suffix.lower() in _IMAGE_EXTENSIONS
 
@@ -539,6 +560,7 @@ def encode_video_web0(
     """
     from nebula.encoder import compress_video
 
+    _require_ffmpeg(ffmpeg, ffprobe)
     source = Path(source).resolve()
     if content_type is None:
         content_type = detect_content_type(source, ffprobe)
@@ -615,6 +637,7 @@ def encode_for_x(
     """
     from nebula.encoder import probe_video
 
+    _require_ffmpeg(ffmpeg, ffprobe)
     source = Path(source).resolve()
     info   = probe_video(source, ffprobe)
     if output is None:
@@ -649,9 +672,21 @@ def encode_for_x(
         "-pix_fmt", "yuv420p", "-crf", str(crf), "-preset", "medium",
         "-c:a", "aac", "-b:a", "128k",
     ]
-    if not has_audio:
+    # Map ONLY the first video + first audio stream, and kill data/timecode
+    # tracks. .mov sources (screen recordings, camera footage) carry a tmcd
+    # timecode track that X can choke on. Explicit mapping isn't enough — the
+    # mp4 muxer re-creates tmcd from the source's `timecode` metadata, so we
+    # also need -dn (no data streams), -write_tmcd 0 (no muxer-generated tmcd),
+    # and -map_metadata -1 (drop the timecode tag that triggers it).
+    if has_audio:
+        cmd += ["-map", "0:v:0", "-map", "0:a:0"]
+    else:
         cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
-    cmd += ["-movflags", "+faststart", str(output)]
+    # NOTE: do NOT use -map_metadata -1 here — it would drop the rotation flag
+    # and flip portrait phone video sideways. -dn + -write_tmcd 0 kill the tmcd
+    # timecode track while leaving rotation/orientation metadata intact.
+    cmd += ["-dn", "-write_tmcd", "0",
+            "-movflags", "+faststart", str(output)]
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
     if proc.returncode != 0:
