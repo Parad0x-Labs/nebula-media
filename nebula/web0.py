@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import shutil
+import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -92,6 +93,26 @@ _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif",
                      ".webp", ".avif", ".heic", ".heif", ".gif"}
 _VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v",
                      ".ts", ".mts", ".m2ts"}
+
+
+class PlatformTarget(str, Enum):
+    """Where the output is going — determines codec, container, and limits."""
+    UNIVERSAL = "universal"  # best quality+size: AV1/x265 video, AVIF image.
+                             # For Arweave / storage / web0. Default.
+    X         = "x"          # Twitter/X-compatible: H.264 ≤1080p + AAC + faststart
+                             # (video), WebP (image). X rejects AV1/AVIF and caps
+                             # at 1080p, so this is the upload-safe downgrade.
+
+# X (Twitter) upload constraints (verified 2026):
+#   - Codec: H.264 only (AV1/HEVC rejected for most accounts)
+#   - Max resolution: 1920×1200 (1080p) — X re-encodes anything larger
+#   - Audio: an AAC track is expected; silent video is often rejected
+#   - X re-encodes uploads to ~2 Mbps 1080p regardless, so don't over-spend bits
+#   - Duration: free accounts cap at 2:20 (140s); Premium allows hours
+#   - File size: 512 MB free, GBs on Premium
+_X_MAX_WIDTH      = 1920
+_X_FREE_DURATION  = 140.0    # seconds — free-tier cap (Premium goes longer)
+_X_VIDEO_CRF      = 20       # x264 CRF; clean 1080p source for X's own re-encode
 
 
 def _is_image(path: Path) -> bool:
@@ -567,9 +588,107 @@ def encode_video_web0(
 # Unified entry point
 # ---------------------------------------------------------------------------
 
+def encode_for_x(
+    source:          Path,
+    output:          Optional[Path] = None,
+    ffmpeg:          str            = "ffmpeg",
+    ffprobe:         str            = "ffprobe",
+    crf:             int            = _X_VIDEO_CRF,
+    max_width:       int            = _X_MAX_WIDTH,
+    measure_quality: bool           = True,
+    ar_per_gb:       float          = _AR_PER_GB_DEFAULT,
+    ar_usd:          float          = _AR_USD_DEFAULT,
+) -> Web0EncodeResult:
+    """
+    Encode a video for direct Twitter/X upload (the upload-safe downgrade).
+
+    X rejects AV1, caps at 1080p, expects an AAC audio track, and re-encodes
+    every upload to ~2 Mbps regardless.  So this produces:
+      * H.264 High profile, level 4.2, yuv420p
+      * downscaled so the long edge <= 1920 (never upscaled)
+      * AAC audio — a silent stereo track is synthesised if the source has none
+      * +faststart (moov atom at front)
+
+    Warns if duration exceeds the free-tier 2:20 cap (needs X Premium).
+    This is intentionally NOT the quality/size-optimal encode — for that, use
+    the universal target (AV1/x265).  This trades efficiency for X compatibility.
+    """
+    from nebula.encoder import probe_video
+
+    source = Path(source).resolve()
+    info   = probe_video(source, ffprobe)
+    if output is None:
+        output = source.with_name(source.stem + "_X.mp4")
+    output = Path(output).resolve()
+
+    if info.duration > _X_FREE_DURATION:
+        log.warning(
+            "duration %.0fs exceeds X free-tier cap (%.0fs / 2:20) — "
+            "needs X Premium to post the full length.",
+            info.duration, _X_FREE_DURATION,
+        )
+
+    src_size  = source.stat().st_size
+    has_audio = info.has_audio
+    # Cap the long edge to max_width; never upscale (min picks iw when iw<max).
+    vf = (f"scale='min({max_width},iw)':-2"
+          if info.width >= info.height
+          else f"scale=-2:'min({max_width},ih)'")
+
+    log.info("encode_for_x: %s  %dx%d→≤%dp  h264 crf%d  audio=%s",
+             source.name, info.width, info.height, max_width, crf,
+             "copy" if has_audio else "synth-silent")
+
+    cmd: list = [ffmpeg, "-y", "-loglevel", "error", "-i", str(source)]
+    if not has_audio:
+        cmd += ["-f", "lavfi", "-i",
+                "anullsrc=channel_layout=stereo:sample_rate=44100"]
+    cmd += [
+        "-vf", vf,
+        "-c:v", "libx264", "-profile:v", "high", "-level", "4.2",
+        "-pix_fmt", "yuv420p", "-crf", str(crf), "-preset", "medium",
+        "-c:a", "aac", "-b:a", "128k",
+    ]
+    if not has_audio:
+        cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+    cmd += ["-movflags", "+faststart", str(output)]
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    if proc.returncode != 0:
+        raise RuntimeError(f"encode_for_x failed (exit {proc.returncode}):\n"
+                           f"{proc.stderr[-1500:]}")
+
+    vmaf = -1.0
+    if measure_quality:
+        try:
+            import json as _json
+            out_info = probe_video(output, ffprobe)
+            vlog = output.with_suffix(".x.vmaf.json")
+            mcmd = [
+                ffmpeg, "-nostdin", "-loglevel", "error",
+                "-i", str(output), "-i", str(source),
+                "-lavfi",
+                (f"[1:v]scale={out_info.width}:{out_info.height}:flags=lanczos[ref];"
+                 f"[0:v][ref]libvmaf=model=version=vmaf_v0.6.1:"
+                 f"n_threads=8:n_subsample=10:log_fmt=json:log_path={vlog}"),
+                "-f", "null", "-",
+            ]
+            subprocess.run(mcmd, capture_output=True, timeout=1800)
+            with open(vlog) as fh:
+                vmaf = round(float(_json.load(fh)["pooled_metrics"]["vmaf"]["mean"]), 2)
+            log.info("  X-file VMAF %.2f (vs source @ output resolution)", vmaf)
+        except Exception as exc:
+            log.warning("X VMAF measurement failed: %s", exc)
+
+    return _make_result(output, ContentType.VIDEO_NATURAL, "h264", src_size, vmaf,
+                        ar_per_gb, ar_usd,
+                        note="X-compatible: H.264 1080p (downgrade from universal AV1)")
+
+
 def encode_for_web0(
     source:          str | Path,
     output:          Optional[str | Path]  = None,
+    target:          str                   = "universal",  # "universal" | "x"
     content_type:    Optional[ContentType] = None,
     quality:         Optional[int]         = None,   # images only
     fmt:             str                   = "avif", # images only
@@ -609,14 +728,27 @@ def encode_for_web0(
     if output is not None:
         output = Path(output).resolve()
 
+    target = target.lower()
+    if target not in ("universal", "x"):
+        raise ValueError(f"Unknown target '{target}'. Choose 'universal' or 'x'.")
+
     if _is_image(source):
+        # X accepts WebP/JPEG/PNG but NOT AVIF — downgrade format for X target.
+        img_fmt = "webp" if (target == "x" and fmt == "avif") else fmt
         return encode_image_web0(
             source=source, output=output,
-            content_type=content_type, quality=quality, fmt=fmt,
+            content_type=content_type, quality=quality, fmt=img_fmt,
             measure_quality=measure_quality, target_ssim=target_ssim,
             ar_per_gb=ar_per_gb, ar_usd=ar_usd,
         )
     elif _is_video(source):
+        if target == "x":
+            return encode_for_x(
+                source=source, output=output,
+                ffmpeg=ffmpeg, ffprobe=ffprobe,
+                measure_quality=measure_quality,
+                ar_per_gb=ar_per_gb, ar_usd=ar_usd,
+            )
         return encode_video_web0(
             source=source, output=output,
             content_type=content_type,
@@ -696,9 +828,13 @@ def main() -> int:
     parser.add_argument("input", nargs="+", help="Input file(s)")
     parser.add_argument("--output", "-o", default=None,
                         help="Output path (single file mode only)")
+    parser.add_argument("--target", "-t", default="universal",
+                        choices=["universal", "x"],
+                        help="universal = best quality+size (AV1/AVIF, for Arweave); "
+                             "x = Twitter/X-compatible (H.264 1080p video / WebP image)")
     parser.add_argument("--format", "-f", default="avif",
                         choices=["avif", "webp"],
-                        help="Output format for images")
+                        help="Output format for images (universal target)")
     parser.add_argument("--content-type", default=None,
                         dest="content_type",
                         choices=[c.value for c in ContentType],
@@ -728,6 +864,7 @@ def main() -> int:
             r = encode_for_web0(
                 source=inputs[0],
                 output=Path(args.output) if args.output else None,
+                target=args.target,
                 content_type=ContentType(args.content_type) if args.content_type else None,
                 quality=args.quality,
                 fmt=args.format,

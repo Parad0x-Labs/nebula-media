@@ -20,6 +20,10 @@ python -m nebula.encoder input.mp4 --no-vmaf            # skip VMAF for speed
 python -m nebula.web0 photo.jpg
 python -m nebula.web0 logo.png --target-ssim 0.97
 
+# PLATFORM TARGET — universal (AV1/AVIF, for Arweave) vs X (H.264 1080p, Twitter-safe)
+python -m nebula.web0 clip.mp4                # universal: best quality+size, store on Arweave
+python -m nebula.web0 clip.mp4 --target x     # X-compatible: H.264 1080p + audio (X rejects AV1)
+
 # .NULL PAGE — compress a whole site folder, rewrite refs, emit proof manifest
 python -m nebula.page ./my-site                          # → ./my-site_web0
 ```
