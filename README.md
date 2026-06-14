@@ -24,8 +24,10 @@ python -m nebula.web0 logo.png --target-ssim 0.97
 
 # PLATFORM TARGET — universal (AV1/AVIF, for Arweave) vs X (H.264 1080p, Twitter-safe)
 # (video targets need ffmpeg on PATH:  brew install ffmpeg  /  apt install ffmpeg)
-python -m nebula.web0 clip.mp4                # universal: best quality+size, store on Arweave
-python -m nebula.web0 clip.mp4 --target x     # X-compatible: H.264 1080p + audio (X rejects AV1)
+python -m nebula.web0 clip.mp4                # universal (DEFAULT): best quality+size — use for everything
+python -m nebula.web0 clip.mp4 --target x     # X ONLY: H.264 1080p — bigger + lower quality, just for posting to X
+# ⚠️ --target x is the LESS-efficient output. Use it only when you need to upload to X/Twitter.
+#    For storage, sharing, or archival, always use universal (the default).
 
 # .NULL PAGE — compress a whole site folder, rewrite refs, emit proof manifest
 python -m nebula.page ./my-site                          # → ./my-site_web0

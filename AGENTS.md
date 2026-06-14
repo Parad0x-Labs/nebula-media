@@ -35,8 +35,10 @@ missing otherwise (e.g. which ffmpeg codec is absent and how to install it).
 python -m nebula.encoder input.mp4
 
 # WEB0 — two targets:
-python -m nebula.web0 input.mp4               # universal: AV1/AVIF, smallest file (for Arweave/storage)
-python -m nebula.web0 input.mp4 --target x    # Twitter/X-compatible: H.264 1080p + AAC, upload-ready
+python -m nebula.web0 input.mp4               # universal (DEFAULT): AV1/AVIF, smallest + best quality
+python -m nebula.web0 input.mp4 --target x    # X ONLY: H.264 1080p — bigger + lower quality, just to post to X
+#   ⚠️ --target x is the LESS-efficient output (a compatibility downgrade). Default to
+#      universal for storage/sharing/archival; use --target x only for X/Twitter uploads.
 
 # IMAGES — AVIF, no ffmpeg needed
 python -m nebula.web0 photo.jpg

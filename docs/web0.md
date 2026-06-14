@@ -5,6 +5,12 @@ the quality/size sweet spot where every byte you don't upload is money saved
 forever. It also produces **platform-compatible** outputs for places that won't
 accept the efficient format.
 
+> **⚠️ `--target x` is NOT the efficient output — it's a compatibility downgrade.**
+> It's bigger and lower quality than `universal` (H.264 1080p vs AV1, capped at
+> 1080p). **Only use it when you need to post to X/Twitter.** For storage,
+> sharing, `.null` publishing, or archiving, always use `universal` (the default).
+> Measured on the same source: universal AV1 = 22 MB / VMAF 99.9; X = 27 MB / VMAF 95.2.
+
 ## Two targets
 
 ```bash
